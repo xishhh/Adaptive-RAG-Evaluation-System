@@ -1,0 +1,39 @@
+# ── Web Framework ──────────────────────────────────────────────────────────────
+fastapi==0.111.0
+uvicorn[standard]==0.29.0
+python-multipart==0.0.9          # required for FastAPI file uploads
+
+# ── Configuration ──────────────────────────────────────────────────────────────
+pydantic==2.7.1
+pydantic-settings==2.2.1
+python-dotenv==1.0.1
+
+# ── LLM Framework ──────────────────────────────────────────────────────────────
+langchain==0.2.1
+langchain-openai==0.1.8
+langchain-community==0.2.1
+langchain-chroma==0.1.1
+openai==1.30.1
+
+# ── Vector Database ─────────────────────────────────────────────────────────────
+chromadb==0.5.0
+
+# ── Document Loaders ───────────────────────────────────────────────────────────
+pypdf==4.2.0                     # PDF loading
+python-docx==1.1.0               # DOCX loading
+openpyxl==3.1.2                  # XLSX loading
+# TXT is handled natively by Python
+
+# ── Evaluation ─────────────────────────────────────────────────────────────────
+ragas==0.1.10
+datasets==2.19.1                 # required by ragas for evaluation datasets
+
+# ── Utilities ──────────────────────────────────────────────────────────────────
+tenacity==8.3.0                  # retry logic for LLM calls
+tiktoken==0.7.0                  # token counting for chunking decisions
+httpx==0.27.0                    # async HTTP client
+
+# ── Testing ────────────────────────────────────────────────────────────────────
+pytest==8.2.0
+pytest-asyncio==0.23.6
+httpx==0.27.0                    # also used as async test client for FastAPI
