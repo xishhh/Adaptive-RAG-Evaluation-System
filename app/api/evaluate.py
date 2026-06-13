@@ -11,7 +11,7 @@ Status: STUB — returns HTTP 501 until Phase 6 (Evaluation Harness) is complete
 
 from fastapi import APIRouter, HTTPException, status
 
-from app.models.requests import EvaluationRequest
+from app.models.requests import EvaluateRequest
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -25,7 +25,7 @@ router = APIRouter()
     tags=["Evaluation"],
     status_code=status.HTTP_501_NOT_IMPLEMENTED,
 )
-async def run_evaluation(request: EvaluationRequest) -> dict:
+async def run_evaluation(request: EvaluateRequest) -> dict:
     """
     Evaluate system quality using RAGAS metrics.
 

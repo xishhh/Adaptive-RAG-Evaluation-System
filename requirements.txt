@@ -37,3 +37,5 @@ httpx==0.27.0                    # async HTTP client
 pytest==8.2.0
 pytest-asyncio==0.23.6
 httpx==0.27.0                    # also used as async test client for FastAPI
+
+pdfplumber==0.11.9

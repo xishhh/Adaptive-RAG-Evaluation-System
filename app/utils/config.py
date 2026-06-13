@@ -1,68 +1,87 @@
 """
-app/utils/config.py
+Environment-based configuration for the Adaptive RAG system.
 
-Central application configuration.
-
-All settings are loaded from environment variables (or a .env file via
-python-dotenv).  Every module that needs a setting imports `get_settings()`
-and reads from the returned object — never reads os.environ directly.
-
-Using @lru_cache ensures the .env file is parsed exactly once per process.
+All configurable values are read from environment variables with
+sensible defaults. Import the `settings` singleton; never instantiate
+Settings directly in application code.
 """
 
 from functools import lru_cache
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
     """
-    Application settings resolved from environment variables.
+    Central configuration object.
 
-    Pydantic-Settings automatically reads from:
-      1. Actual environment variables
-      2. A .env file in the working directory (if present)
-
-    Field names map directly to environment variable names (case-insensitive).
+    Values are loaded from environment variables (case-insensitive).
+    An .env file in the project root is also supported via pydantic-settings.
     """
+
+    
 
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
         case_sensitive=False,
+        extra="ignore",
+        
+        
     )
 
-    # ── OpenAI ─────────────────────────────────────────────────────────────────
-    openai_api_key: str
-    openai_model: str = "meta-llama/llama-3.2-3b-instruct:free"
-    openai_embedding_model: str = "text-embedding-3-small"
-
-    # ── ChromaDB ───────────────────────────────────────────────────────────────
-    chroma_persist_directory: str = "./chroma_db"
-    chroma_collection_name: str = "adaptive_rag"
-
-    # ── Retrieval ──────────────────────────────────────────────────────────────
-    retrieval_top_k: int = 5
-    retrieval_confidence_threshold: float = 0.5
-
-    # ── Chunking ───────────────────────────────────────────────────────────────
-    chunk_size: int = 512
-    chunk_overlap: int = 50
-
-    # ── Application ────────────────────────────────────────────────────────────
-    log_level: str = "INFO"
     app_env: str = "development"
+    log_level: str = "INFO"
 
     @property
     def is_production(self) -> bool:
         return self.app_env.lower() == "production"
+    
+
+    # ------------------------------------------------------------------ #
+    # OpenAI                                                               #
+    # ------------------------------------------------------------------ #
+    openai_api_key: str = ""
+
+    # ------------------------------------------------------------------ #
+    # Chunking                                                             #
+    # ------------------------------------------------------------------ #
+    chunk_size: int = 1000
+    """Target character count per chunk."""
+
+    chunk_overlap: int = 200
+    """Character overlap between consecutive chunks to preserve context."""
+
+    # ------------------------------------------------------------------ #
+    # ChromaDB  (stubbed — used from Phase 3 onward)                      #
+    # ------------------------------------------------------------------ #
+    chroma_persist_directory: str = "./data/chroma_db"
+    chroma_collection_name: str = "adaptive_rag"
+
+    # ------------------------------------------------------------------ #
+    # Paths                                                                #
+    # ------------------------------------------------------------------ #
+    raw_documents_dir: str = "./data/raw_documents"
+    processed_documents_dir: str = "./data/processed_documents"
+    evaluation_results_dir: str = "./evaluation_results"
+
+    # ------------------------------------------------------------------ #
+    # Retrieval  (stubbed — used from Phase 4 onward)                     #
+    # ------------------------------------------------------------------ #
+    retrieval_top_k: int = 5
+    retrieval_confidence_threshold: float = 0.75
 
 
-@lru_cache
+@lru_cache(maxsize=1)
 def get_settings() -> Settings:
     """
-    Return the cached application settings instance.
+    Return the cached Settings singleton.
 
-    Use this function everywhere rather than instantiating Settings directly.
-    The @lru_cache decorator guarantees the environment is parsed only once.
+    Using lru_cache means the .env file is read once per process,
+    not on every import.
     """
     return Settings()
+
+
+# Module-level singleton — import this everywhere.
+settings: Settings = get_settings()
