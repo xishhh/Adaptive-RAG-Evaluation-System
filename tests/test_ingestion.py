@@ -22,7 +22,7 @@ import pytest
 
 from app.ingestion.chunker import DocumentChunker
 from app.ingestion.loaders import DocumentLoader, UnsupportedFileTypeError
-from app.models.responses import Chunk, RawDocument
+from app.models.documents import Chunk, RawDocument
 
 
 # ======================================================================= #

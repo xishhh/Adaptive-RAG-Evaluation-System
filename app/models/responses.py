@@ -1,168 +1,119 @@
 """
-Pydantic models for API responses AND internal data structures.
+app/models/responses.py
 
-Internal models (RawDocument, Chunk) live here because they are
-consumed by multiple layers (ingestion, vectorstore, retrieval) and
-do not belong exclusively to any single package.
+Pydantic response models for all API endpoints.
 
-API response models (UploadResponse, QueryResponse, etc.) define
-the shape of HTTP responses returned by the FastAPI routes.
+Phase 3 additions:
+- UploadResponse: now includes chunks_stored count (previously was a stub).
+- CollectionStatsResponse: new model for the /health endpoint to report
+  ChromaDB collection state.
+- ChunkResult: represents a single retrieved chunk from ChromaDB.
 """
 
-from __future__ import annotations
-
-import uuid
-from typing import Any
+from typing import Any, Optional
 
 from pydantic import BaseModel, Field
-from datetime import datetime
 
 
-# ======================================================================= #
-# Internal data models                                                      #
-# ======================================================================= #
-
-
-class RawDocument(BaseModel):
-    """
-    Represents a document after loading and text extraction,
-    before chunking.
-
-    Produced by: app/ingestion/loaders.py
-    Consumed by: app/ingestion/chunker.py
-    """
-
-    document_name: str = Field(
-        ...,
-        description="Original filename, e.g. 'contract_2024.pdf'.",
-    )
-    file_type: str = Field(
-        ...,
-        description="Lowercase file extension without dot, e.g. 'pdf'.",
-    )
-    full_text: str = Field(
-        ...,
-        description="Complete extracted text content of the document.",
-    )
-    metadata: dict[str, Any] = Field(
-        default_factory=dict,
-        description=(
-            "Arbitrary key-value pairs extracted alongside the text. "
-            "For PDFs this may include page count; for XLSX, sheet names."
-        ),
-    )
-
-
-class Chunk(BaseModel):
-    """
-    Represents a single text chunk ready for embedding and storage.
-
-    Produced by: app/ingestion/chunker.py
-    Consumed by: app/ingestion/embeddings.py (Phase 3)
-                 app/vectorstore/chroma_manager.py (Phase 3)
-
-    The schema matches exactly what SYSTEM_ARCHITECTURE.md
-    Component 2 specifies for stored metadata.
-    """
-
-    chunk_id: str = Field(
-        default_factory=lambda: str(uuid.uuid4()),
-        description="Unique identifier for this chunk.",
-    )
-    document_name: str = Field(
-        ...,
-        description="Source document filename.",
-    )
-    chunk_text: str = Field(
-        ...,
-        description="Text content of this chunk.",
-    )
-    page_number: int | None = Field(
-        default=None,
-        description=(
-            "Page number this chunk originated from, if determinable. "
-            "None for formats without page structure (e.g. TXT, XLSX)."
-        ),
-    )
-    chunk_index: int = Field(
-        ...,
-        ge=0,
-        description="Zero-based position of this chunk within its source document.",
-    )
-    metadata: dict[str, Any] = Field(
-        default_factory=dict,
-        description="Additional metadata propagated from the source RawDocument.",
-    )
-
-
-# ======================================================================= #
-# API response models                                                       #
-# ======================================================================= #
-
+# =============================================================================
+# Upload
+# =============================================================================
 
 class UploadResponse(BaseModel):
-    """Response for POST /upload."""
+    """Response returned after a successful document ingestion."""
 
-    message: str
-    document_name: str
-    chunks_created: int
-    file_type: str
+    filename: str = Field(..., description="Original filename of the uploaded document.")
+    chunks_stored: int = Field(..., description="Number of chunks stored in ChromaDB.", ge=0)
+    message: str = Field(..., description="Human-readable status message.")
+
+    model_config = {"json_schema_extra": {
+        "example": {
+            "filename": "contract_a.pdf",
+            "chunks_stored": 42,
+            "message": "Successfully ingested 'contract_a.pdf' into the knowledge base.",
+        }
+    }}
 
 
-class Citation(BaseModel):
-    """A single source citation included in a query answer."""
+# =============================================================================
+# Query  (placeholder — Phase 4 will complete this)
+# =============================================================================
 
-    document_name: str
-    chunk_id: str
-    page_number: int | None = None
-    excerpt: str = Field(description="Short excerpt from the source chunk.")
+class ChunkResult(BaseModel):
+    """A single retrieved chunk from ChromaDB."""
+
+    chunk_id: str = Field(..., description="Unique identifier for this chunk.")
+    chunk_text: str = Field(..., description="Raw text of the chunk.")
+    document_name: str = Field(..., description="Source document filename.")
+    page_number: int = Field(0, description="Page number within the source document.")
+    chunk_index: int = Field(0, description="Position of this chunk within the document.")
+    relevance_score: float = Field(
+        ..., description="Cosine similarity score (0–1, higher = more relevant).", ge=0.0, le=1.0
+    )
 
 
 class QueryResponse(BaseModel):
-    """Response for POST /query."""
+    """Response returned after a question-answering request."""
 
-    question: str
-    answer: str
-    citations: list[Citation] = Field(default_factory=list)
-    retrieval_strategy: str = Field(
-        description=(
-            "Which retrieval path was used: 'direct_llm', "
-            "'standard_retrieval', or 'adaptive_retrieval'."
-        )
+    question: str = Field(..., description="The original question asked by the user.")
+    answer: str = Field(..., description="The generated answer.")
+    sources: list[ChunkResult] = Field(
+        default_factory=list, description="Chunks used to generate the answer."
     )
+    model_config = {"json_schema_extra": {
+        "example": {
+            "question": "What is the termination clause?",
+            "answer": "The contract may be terminated with 30 days' written notice …",
+            "sources": [],
+        }
+    }}
 
 
-class EvaluationMetrics(BaseModel):
-    """Aggregate metrics from one evaluation run."""
+# =============================================================================
+# Evaluation  (placeholder — Phase 6 will complete this)
+# =============================================================================
 
-    recall_at_k: float | None = None
-    precision_at_k: float | None = None
-    faithfulness: float | None = None
-    answer_relevance: float | None = None
+class EvaluationResponse(BaseModel):
+    """Response returned after running the evaluation harness."""
 
-
-class EvaluateResponse(BaseModel):
-    """Response for POST /evaluate."""
-
-    run_label: str
-    dataset_path: str
-    metrics: EvaluationMetrics
-    report_path: str = Field(description="Path to the saved JSON report.")
-
-
-class MetricsResponse(BaseModel):
-    """Response for GET /metrics."""
-
-    runs: list[dict[str, Any]] = Field(
-        default_factory=list,
-        description="List of historical evaluation run summaries.",
+    run_id: str = Field(..., description="Unique identifier for this evaluation run.")
+    metrics: dict[str, Any] = Field(
+        default_factory=dict, description="Evaluation metric results."
     )
+    message: str = Field(..., description="Human-readable status message.")
+
+
+# =============================================================================
+# Health
+# =============================================================================
+
+class CollectionStatsResponse(BaseModel):
+    """ChromaDB collection statistics returned by /health."""
+
+    collection_name: str
+    total_chunks: int
+    persist_dir: str
+    embedding_model: str
 
 
 class HealthResponse(BaseModel):
-    """Response for GET /health."""
+    """Response returned by GET /health."""
 
-    status: str = "ok"
-    version: str = "1.0.0"
-    environment: str
-    timestamp: datetime
+    status: str = Field(..., description="'ok' when the service is healthy.")
+    version: str = Field(..., description="API version string.")
+    vector_store: Optional[CollectionStatsResponse] = Field(
+        None, description="ChromaDB collection statistics."
+    )
+
+    model_config = {"json_schema_extra": {
+        "example": {
+            "status": "ok",
+            "version": "0.1.0",
+            "vector_store": {
+                "collection_name": "adaptive_rag",
+                "total_chunks": 142,
+                "persist_dir": "./data/chroma_db",
+                "embedding_model": "text-embedding-3-small",
+            },
+        }
+    }}

@@ -27,7 +27,7 @@ import pdfplumber
 from docx import Document as DocxDocument
 from openpyxl import load_workbook
 
-from app.models.responses import RawDocument
+from app.models.documents import RawDocument
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)

@@ -28,8 +28,8 @@ from typing import Any
 
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
-from app.models.responses import Chunk, RawDocument
-from app.utils.config import settings
+from app.models.documents import Chunk, RawDocument
+from app.utils.config import get_settings
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -55,8 +55,9 @@ class DocumentChunker:
         chunk_size: int | None = None,
         chunk_overlap: int | None = None,
     ) -> None:
-        self._chunk_size = chunk_size or settings.chunk_size
-        self._chunk_overlap = chunk_overlap or settings.chunk_overlap
+        settings = get_settings()
+        self._chunk_size = chunk_size or settings.CHUNK_SIZE
+        self._chunk_overlap = chunk_overlap or settings.CHUNK_OVERLAP
 
         self._splitter = RecursiveCharacterTextSplitter(
             chunk_size=self._chunk_size,

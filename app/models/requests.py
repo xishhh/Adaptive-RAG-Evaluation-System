@@ -10,19 +10,19 @@ from pydantic import BaseModel, Field
 
 
 class QueryRequest(BaseModel):
-    """Payload for POST /query."""
+    """Request body for POST /query."""
 
     question: str = Field(
         ...,
         min_length=1,
-        max_length=2000,
-        description="Natural language question to answer.",
+        description="The natural-language question to answer.",
+        examples=["What is the termination clause in contract A?"],
     )
     top_k: int = Field(
         default=5,
         ge=1,
         le=20,
-        description="Number of document chunks to retrieve.",
+        description="Number of chunks to retrieve from the vector store.",
     )
 
 

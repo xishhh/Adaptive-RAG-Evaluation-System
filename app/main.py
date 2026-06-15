@@ -24,6 +24,7 @@ from app.utils.config import get_settings
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
+from app.api.query import router as query_router
 
 
 # ── Lifespan ───────────────────────────────────────────────────────────────────
@@ -41,8 +42,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """
     settings = get_settings()
     logger.info(
-        f"Starting Adaptive RAG API | env={settings.app_env} | "
-        f"log_level={settings.log_level}"
+        f"Starting Adaptive RAG API | env={settings.APP_ENV} | "
+        f"log_level={settings.LOG_LEVEL}"
     )
     yield
     logger.info("Adaptive RAG API shutting down")
@@ -98,3 +99,4 @@ def create_app() -> FastAPI:
 # ── Application Instance ───────────────────────────────────────────────────────
 # This is the object uvicorn targets: `uvicorn app.main:app`
 app = create_app()
+app.include_router(query_router)
