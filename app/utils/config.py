@@ -6,10 +6,15 @@ Centralised application configuration using Pydantic Settings.
 All environment variables are read from here. No other module should
 read os.environ directly — import get_settings() instead.
 
-Changes in Phase 3:
-- Added CHROMA_PERSIST_DIR: filesystem path for ChromaDB persistence.
-- Added CHROMA_COLLECTION_NAME: logical name of the ChromaDB collection.
-- Added EMBEDDING_MODEL: configurable OpenAI embedding model name.
+Phase 3 additions:
+- CHROMA_PERSIST_DIR, CHROMA_COLLECTION_NAME, EMBEDDING_MODEL.
+
+Phase 5 additions:
+- CONFIDENCE_THRESHOLD: minimum average relevance score for retrieved
+  chunks to be considered GOOD_CONTEXT. Below this, the adaptive
+  pipeline triggers query rewriting.
+- ADAPTIVE_MAX_REWRITES: safety cap on how many rewrite+re-retrieval
+  cycles the adaptive pipeline will attempt per query.
 """
 
 from functools import lru_cache
@@ -21,8 +26,8 @@ class Settings(BaseSettings):
     """
     Application settings loaded from environment variables.
 
-    All fields have sensible defaults so the app starts without a .env file
-    in development, but production deployments must supply real values.
+    All fields have sensible defaults so the app starts without a .env
+    file in development, but production deployments must supply real values.
     """
 
     model_config = SettingsConfigDict(
@@ -31,16 +36,14 @@ class Settings(BaseSettings):
         case_sensitive=False,
         extra="ignore",
     )
-    
 
     # ------------------------------------------------------------------
-    # OpenAI
+    # OpenAI / OpenRouter
     # ------------------------------------------------------------------
     OPENAI_API_KEY: str = ""
-    OPENAI_API_BASE: str = "https://openrouter.ai/api/v1"  # Add this line
+    OPENAI_API_BASE: str = "https://openrouter.ai/api/v1"
     LLM_MODEL: str = "gpt-4o-mini"
-    EMBEDDING_MODEL: str = "text-embedding-3-small"  # <--- Restore this line
-
+    EMBEDDING_MODEL: str = "text-embedding-3-small"
 
     # ------------------------------------------------------------------
     # ChromaDB  (Phase 3)
@@ -55,6 +58,28 @@ class Settings(BaseSettings):
     CHUNK_OVERLAP: int = 64
     RAW_DOCUMENTS_DIR: str = "./data/raw_documents"
     PROCESSED_DOCUMENTS_DIR: str = "./data/processed_documents"
+
+    # ------------------------------------------------------------------
+    # Adaptive Retrieval  (Phase 5)
+    # ------------------------------------------------------------------
+    CONFIDENCE_THRESHOLD: float = 0.45
+    """
+    Minimum average relevance score (0.0–1.0) across top-K retrieved chunks
+    to be judged GOOD_CONTEXT. Scores below this trigger query rewriting.
+
+    Tuning guidance:
+      - 0.35–0.45 is a practical starting range for cosine similarity
+        with OpenAI text-embedding-3-small.
+      - Lower values mean the pipeline rewrites more aggressively.
+      - Higher values mean it rewrites on nearly every query.
+    """
+
+    ADAPTIVE_MAX_REWRITES: int = 1
+    """
+    Maximum number of rewrite+re-retrieval cycles per query.
+    Kept at 1 for Phase 5 — the spec describes a single rewrite loop.
+    Raise in future phases if multi-hop rewriting is introduced.
+    """
 
     # ------------------------------------------------------------------
     # API

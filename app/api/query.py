@@ -3,17 +3,24 @@ app/api/query.py
 
 FastAPI router for POST /query.
 
+Phase 4: Used RAGService → QueryResponse.
+Phase 5: Upgraded to AdaptiveRAGService → AdaptiveQueryResponse.
+
+The response shape is a strict superset of Phase 4's QueryResponse
+(three additional fields: query_type, rewritten_query, retrieval_strategy),
+so existing clients that ignore unknown fields remain unaffected.
+
 Responsibilities:
   - Accept a QueryRequest (question + optional top_k).
-  - Wire up ChromaManager and RAGService.
-  - Delegate all logic to RAGService.query().
-  - Return a QueryResponse.
+  - Wire up ChromaManager and AdaptiveRAGService.
+  - Delegate all logic to AdaptiveRAGService.query().
+  - Return an AdaptiveQueryResponse.
   - Translate known domain errors to appropriate HTTP responses.
 
-Design:
-  ChromaManager and RAGService are instantiated per-request here for
-  simplicity in Phase 4. Phase 7 (API Completion) will move these into
-  FastAPI dependency injection for proper lifecycle management.
+Note:
+  ChromaManager and AdaptiveRAGService are instantiated per-request.
+  Phase 7 (API Completion) will lift these into FastAPI dependency
+  injection for proper lifecycle management.
 """
 
 from __future__ import annotations
@@ -24,8 +31,8 @@ import openai
 from fastapi import APIRouter, HTTPException, status
 
 from app.models.requests import QueryRequest
-from app.models.responses import QueryResponse
-from app.services.rag_service import RAGService
+from app.models.responses import AdaptiveQueryResponse
+from app.services.adaptive_rag_service import AdaptiveRAGService
 from app.vectorstore.chroma_manager import ChromaManager
 
 logger = logging.getLogger(__name__)
@@ -35,35 +42,40 @@ router = APIRouter()
 
 @router.post(
     "/query",
-    response_model=QueryResponse,
-    summary="Ask a question against the knowledge base.",
+    response_model=AdaptiveQueryResponse,
+    summary="Ask a question against the knowledge base (adaptive retrieval).",
     description=(
-        "Submit a natural-language question. The system retrieves relevant "
-        "document chunks from ChromaDB, generates a grounded answer using the "
-        "configured LLM, and returns the answer with source citations."
+        "Submit a natural-language question. The adaptive pipeline classifies "
+        "the query, retrieves relevant document chunks from ChromaDB, evaluates "
+        "retrieval confidence, and rewrites the query if confidence is low before "
+        "generating a grounded answer with source citations. "
+        "The response includes retrieval_strategy and query_type fields that "
+        "expose what the adaptive pipeline decided."
     ),
 )
-async def query_endpoint(request: QueryRequest) -> QueryResponse:
+async def query_endpoint(request: QueryRequest) -> AdaptiveQueryResponse:
     """
     POST /query
 
     Request body:
-        question (str):  The user's question. Required.
-        top_k    (int):  Number of chunks to retrieve. Optional, defaults to 5.
+        question (str): The user's question. Required.
+        top_k    (int): Number of chunks to retrieve. Optional, defaults to 5.
 
     Returns:
-        QueryResponse with answer text and source citations.
+        AdaptiveQueryResponse with answer, citations, and adaptive metadata.
 
     Error responses:
         400 — Empty or invalid question.
-        422 — Request body validation failure (handled by FastAPI).
-        500 — Unexpected error during retrieval or LLM call.
+        422 — Request body validation failure (handled by FastAPI automatically).
+        429 — LLM provider rate limit hit.
+        502 — LLM API authentication or connection error.
+        500 — Unexpected internal error.
     """
     logger.info("POST /query | question='%s'", request.question[:120])
 
     try:
         chroma = ChromaManager()
-        service = RAGService(chroma_manager=chroma, top_k=request.top_k)
+        service = AdaptiveRAGService(chroma_manager=chroma, top_k=request.top_k)
         return service.query(question=request.question)
 
     except ValueError as exc:
@@ -73,8 +85,6 @@ async def query_endpoint(request: QueryRequest) -> QueryResponse:
             detail=str(exc),
         )
     except openai.RateLimitError as exc:
-        # The free-tier OpenRouter model is rate-limited upstream.
-        # Surface the provider's message so the caller knows to retry.
         logger.warning("LLM rate limit hit: %s", exc)
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
@@ -85,7 +95,6 @@ async def query_endpoint(request: QueryRequest) -> QueryResponse:
             ),
         )
     except openai.APIError as exc:
-        # Covers AuthenticationError, APIConnectionError, etc.
         logger.error("OpenAI/OpenRouter API error during query: %s", exc)
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,

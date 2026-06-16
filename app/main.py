@@ -24,7 +24,6 @@ from app.utils.config import get_settings
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
-from app.api.query import router as query_router
 
 
 # ── Lifespan ───────────────────────────────────────────────────────────────────
@@ -99,4 +98,3 @@ def create_app() -> FastAPI:
 # ── Application Instance ───────────────────────────────────────────────────────
 # This is the object uvicorn targets: `uvicorn app.main:app`
 app = create_app()
-app.include_router(query_router)
