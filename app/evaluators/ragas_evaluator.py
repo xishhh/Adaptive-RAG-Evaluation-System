@@ -36,7 +36,7 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from datasets import Dataset
+from datasets import Dataset, Features, Sequence, Value
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from ragas import evaluate
 from ragas.llms import LangchainLLMWrapper
@@ -151,7 +151,7 @@ class RagasEvaluator:
                         "question": sample["question"],
                         "answer": sample["answer"],
                         "contexts": sample["contexts"],
-                        "reference": sample["reference"],
+                        "ground_truth": sample["reference"],  # RAGAS expects "ground_truth", not "reference"
                     }
                 )
 
@@ -161,7 +161,15 @@ class RagasEvaluator:
         logger.info(
             "Loaded %d evaluation samples from '%s'.", len(samples), dataset_path
         )
-        return Dataset.from_list(samples)
+        features = Features(
+            {
+                "question": Value("string"),
+                "answer": Value("string"),
+                "contexts": Sequence(Value("string")),
+                "ground_truth": Value("string"),
+            }
+        )
+        return Dataset.from_list(samples, features=features)
 
     def run(self, dataset_path: Path) -> dict[str, float | None]:
         """

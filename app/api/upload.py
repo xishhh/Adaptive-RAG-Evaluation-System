@@ -1,3 +1,4 @@
+# app/api/upload.py
 """
 app/api/upload.py
 
@@ -9,14 +10,22 @@ Accepts a document file, runs it through the ingestion pipeline
 Phase 3 change:
 - ChromaManager.add_chunks() replaces the Phase 2 stub that returned chunks
   without storing them anywhere.
+
+Phase 6 change:
+- EvalDatasetGenerator.generate_from_chunks() is called after ChromaDB
+  storage to automatically produce evaluation Q&A samples for every
+  ingested document. Failures here are non-fatal and never affect the
+  upload response.
 """
 
 import logging
 import tempfile
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException, UploadFile, status
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, status
 
+from app.api.dependencies import get_chroma_manager, get_eval_generator
+from app.evaluators.eval_dataset_generator import EvalDatasetGenerator
 from app.ingestion.chunker import DocumentChunker
 from app.ingestion.loaders import DocumentLoader
 from app.models.responses import UploadResponse
@@ -26,9 +35,7 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
-# Single shared ChromaManager instance per process.
-# In Phase 7 (API Completion) this will move to a dependency injection pattern.
-_chroma_manager = ChromaManager()
+
 
 SUPPORTED_EXTENSIONS = {".pdf", ".docx", ".txt", ".xlsx"}
 
@@ -44,7 +51,11 @@ SUPPORTED_EXTENSIONS = {".pdf", ".docx", ".txt", ".xlsx"}
         "and stores everything in the ChromaDB vector database."
     ),
 )
-async def upload_document(file: UploadFile) -> UploadResponse:
+async def upload_document(
+    file: UploadFile,
+    chroma_manager: ChromaManager = Depends(get_chroma_manager),
+    eval_generator: EvalDatasetGenerator = Depends(get_eval_generator),
+) -> UploadResponse:
     """
     Ingest a document into the vector knowledge base.
 
@@ -54,7 +65,8 @@ async def upload_document(file: UploadFile) -> UploadResponse:
     3. Load and extract text via DocumentLoader.
     4. Chunk text via DocumentChunker.
     5. Store chunks + embeddings in ChromaDB.
-    6. Return ingestion summary.
+    6. Generate evaluation Q&A samples (non-fatal if it fails).
+    7. Return ingestion summary.
     """
     # --- 1. Validate ---
     suffix = Path(file.filename or "").suffix.lower()
@@ -112,17 +124,36 @@ async def upload_document(file: UploadFile) -> UploadResponse:
             detail="No text content could be extracted from the document.",
         )
 
-    # --- 5. Store in ChromaDB ---
     try:
-        stored_count = _chroma_manager.add_chunks(
-    [chunk.model_dump() for chunk in chunks]
-)
+        stored_count = chroma_manager.add_chunks(
+            [chunk.model_dump() for chunk in chunks]
+        )
     except Exception as exc:
         logger.exception("ChromaDB storage failed for '%s'.", file.filename)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to store document in vector database.",
         ) from exc
+
+    # --- 6. Generate evaluation dataset (non-fatal) ---
+    try:
+        samples_written = eval_generator.generate_from_chunks(
+            chunks=chunks,
+            document_name=file.filename or "unknown",
+        )
+        logger.info(
+            "Eval dataset generation | file='%s' | samples_written=%d",
+            file.filename,
+            samples_written,
+        )
+    except Exception as exc:
+        # Generation failure must never fail the upload.
+        # The document is already safely stored in ChromaDB at this point.
+        logger.error(
+            "Eval dataset generation failed for '%s' (upload still succeeded): %s",
+            file.filename,
+            exc,
+        )
 
     logger.info(
         "Ingestion complete | file='%s' | chunks=%d",

@@ -10,8 +10,9 @@ Phase 3 change:
 
 import logging
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 
+from app.api.dependencies import get_chroma_manager
 from app.models.responses import CollectionStatsResponse, HealthResponse
 from app.utils.config import get_settings
 from app.vectorstore.chroma_manager import ChromaManager
@@ -21,7 +22,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 settings = get_settings()
 
-_chroma_manager = ChromaManager()
+
 
 
 @router.get(
@@ -30,12 +31,14 @@ _chroma_manager = ChromaManager()
     summary="Health check",
     description="Returns service status and ChromaDB collection statistics.",
 )
-def health_check() -> HealthResponse:
+def health_check(
+    chroma_manager: ChromaManager = Depends(get_chroma_manager),
+) -> HealthResponse:
     """
     Verify the service is running and report vector store state.
     """
     try:
-        stats = _chroma_manager.collection_stats()
+        stats = chroma_manager.collection_stats()
         vector_store = CollectionStatsResponse(**stats)
     except Exception:
         logger.exception("ChromaDB health check failed.")

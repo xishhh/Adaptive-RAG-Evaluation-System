@@ -28,12 +28,12 @@ from __future__ import annotations
 import logging
 
 import openai
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status
 
+from app.api.dependencies import get_adaptive_rag_service
 from app.models.requests import QueryRequest
 from app.models.responses import AdaptiveQueryResponse
 from app.services.adaptive_rag_service import AdaptiveRAGService
-from app.vectorstore.chroma_manager import ChromaManager
 
 logger = logging.getLogger(__name__)
 
@@ -53,7 +53,10 @@ router = APIRouter()
         "expose what the adaptive pipeline decided."
     ),
 )
-async def query_endpoint(request: QueryRequest) -> AdaptiveQueryResponse:
+async def query_endpoint(
+    request: QueryRequest,
+    service: AdaptiveRAGService = Depends(get_adaptive_rag_service),
+) -> AdaptiveQueryResponse:
     """
     POST /query
 
@@ -74,9 +77,7 @@ async def query_endpoint(request: QueryRequest) -> AdaptiveQueryResponse:
     logger.info("POST /query | question='%s'", request.question[:120])
 
     try:
-        chroma = ChromaManager()
-        service = AdaptiveRAGService(chroma_manager=chroma, top_k=request.top_k)
-        return service.query(question=request.question)
+        return service.query(question=request.question, top_k=request.top_k)
 
     except ValueError as exc:
         logger.warning("Invalid query request: %s", exc)

@@ -32,11 +32,13 @@ Design decisions:
        500 — unexpected RAGAS or I/O failure
 """
 
+import asyncio
 from datetime import datetime, timezone
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status
 
+from app.api.dependencies import get_metrics_tracker, get_ragas_evaluator
 from app.evaluators.metrics_tracker import MetricsTracker
 from app.evaluators.ragas_evaluator import RagasEvaluator
 from app.models.requests import EvaluateRequest
@@ -50,9 +52,7 @@ from app.utils.logger import get_logger
 logger = get_logger(__name__)
 router = APIRouter()
 
-# Module-level singletons — constructed once at startup.
-_ragas_evaluator = RagasEvaluator()
-_metrics_tracker = MetricsTracker()
+
 
 
 @router.post(
@@ -66,7 +66,11 @@ _metrics_tracker = MetricsTracker()
     tags=["Evaluation"],
     status_code=status.HTTP_200_OK,
 )
-async def run_evaluation(request: EvaluateRequest) -> EvaluationResponse:
+async def run_evaluation(
+    request: EvaluateRequest,
+    ragas_evaluator: RagasEvaluator = Depends(get_ragas_evaluator),
+    metrics_tracker: MetricsTracker = Depends(get_metrics_tracker),
+) -> EvaluationResponse:
     """
     Evaluate system quality using RAGAS metrics.
 
@@ -89,7 +93,8 @@ async def run_evaluation(request: EvaluateRequest) -> EvaluationResponse:
     # Run evaluation                                                        #
     # ------------------------------------------------------------------ #
     try:
-        scores = _ragas_evaluator.run(dataset_path)
+        # Run in a thread so RAGAS gets a clean event loop (avoids conflict with FastAPI's loop).
+        scores = await asyncio.to_thread(ragas_evaluator.run, dataset_path)
     except FileNotFoundError as exc:
         logger.warning("Evaluation dataset not found: %s", exc)
         raise HTTPException(
@@ -114,12 +119,12 @@ async def run_evaluation(request: EvaluateRequest) -> EvaluationResponse:
     # ------------------------------------------------------------------ #
     # Load dataset once more just to count samples (already validated above).
     try:
-        dataset = _ragas_evaluator.load_dataset(dataset_path)
+        dataset = ragas_evaluator.load_dataset(dataset_path)
         sample_count = len(dataset)
     except Exception:
         sample_count = 0
 
-    run_id = _metrics_tracker.save_run(
+    run_id = metrics_tracker.save_run(
         run_label=request.run_label,
         dataset_path=str(dataset_path),
         scores=scores,
@@ -155,14 +160,16 @@ async def run_evaluation(request: EvaluateRequest) -> EvaluationResponse:
     tags=["Evaluation"],
     status_code=status.HTTP_200_OK,
 )
-async def get_metrics() -> MetricsSummaryResponse:
+async def get_metrics(
+    metrics_tracker: MetricsTracker = Depends(get_metrics_tracker),
+) -> MetricsSummaryResponse:
     """
     Return all historical evaluation runs and per-metric aggregate scores.
     """
     logger.info("GET /metrics called.")
 
-    runs_raw = _metrics_tracker.list_runs(limit=50)
-    aggregate = _metrics_tracker.get_aggregate_metrics()
+    runs_raw = metrics_tracker.list_runs(limit=50)
+    aggregate = metrics_tracker.get_aggregate_metrics()
 
     runs = [EvaluationRunRecord(**record) for record in runs_raw]
 
