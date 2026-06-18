@@ -19,7 +19,7 @@ from typing import AsyncGenerator
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api import evaluate, health, query, upload
+from app.api import evaluate, health, query, session, upload
 from app.utils.config import get_settings
 from app.utils.logger import get_logger
 
@@ -33,11 +33,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """
     Application lifespan handler.
 
-    Code before `yield` runs on startup.
-    Code after `yield` runs on shutdown.
-
-    In later phases, this will initialise the ChromaDB client and warm up
-    the embedding model. For Phase 1, it only logs the startup event.
+    Code before ``yield`` runs on startup.
+    Code after ``yield`` runs on shutdown — all user data is cleared
+    so every session starts and ends with a clean slate.
     """
     settings = get_settings()
     logger.info(
@@ -45,7 +43,18 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         f"log_level={settings.LOG_LEVEL}"
     )
     yield
-    logger.info("Adaptive RAG API shutting down")
+    logger.info("Adaptive RAG API shutting down — clearing session data …")
+
+    from app.api.dependencies import (
+        get_chroma_manager,
+        get_ingestion_tracker,
+    )
+    from app.api.session import reset_all_data
+
+    reset_all_data(
+        chroma_manager=get_chroma_manager(),
+        tracker=get_ingestion_tracker(),
+    )
 
 
 # ── Application Factory ────────────────────────────────────────────────────────
@@ -90,6 +99,7 @@ def create_app() -> FastAPI:
     app.include_router(upload.router)
     app.include_router(query.router)
     app.include_router(evaluate.router)
+    app.include_router(session.router)
 
     logger.info("All routers registered")
     return app

@@ -1,34 +1,31 @@
 """
 app/api/query.py
 
-FastAPI router for POST /query.
+FastAPI routers for POST /query and POST /query/stream.
 
 Phase 4: Used RAGService → QueryResponse.
 Phase 5: Upgraded to AdaptiveRAGService → AdaptiveQueryResponse.
+Phase 8: Added /query/stream for SSE token streaming.
 
-The response shape is a strict superset of Phase 4's QueryResponse
+The response shape of /query is a strict superset of Phase 4's QueryResponse
 (three additional fields: query_type, rewritten_query, retrieval_strategy),
 so existing clients that ignore unknown fields remain unaffected.
 
 Responsibilities:
   - Accept a QueryRequest (question + optional top_k).
-  - Wire up ChromaManager and AdaptiveRAGService.
-  - Delegate all logic to AdaptiveRAGService.query().
-  - Return an AdaptiveQueryResponse.
+  - /query:       Delegates to AdaptiveRAGService.query() → AdaptiveQueryResponse.
+  - /query/stream: Delegates to AdaptiveRAGService.stream_query() → SSE stream.
   - Translate known domain errors to appropriate HTTP responses.
-
-Note:
-  ChromaManager and AdaptiveRAGService are instantiated per-request.
-  Phase 7 (API Completion) will lift these into FastAPI dependency
-  injection for proper lifecycle management.
 """
 
 from __future__ import annotations
 
+import json
 import logging
 
 import openai
 from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi.responses import StreamingResponse
 
 from app.api.dependencies import get_adaptive_rag_service
 from app.models.requests import QueryRequest
@@ -107,3 +104,62 @@ async def query_endpoint(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"An unexpected error occurred: {exc}",
         )
+
+
+@router.post(
+    "/query/stream",
+    summary="Ask a question and stream the answer via SSE",
+    description=(
+        "Same adaptive RAG pipeline as POST /query, but the answer is "
+        "streamed token-by-token using Server-Sent Events. "
+        "Events:\n"
+        "  - metadata: query_type, sources, rewritten_query, retrieval_strategy\n"
+        "  - token:    a single chunk of generated answer text\n"
+        "  - error:    a pipeline error (terminal)\n"
+        "  - done:     signals completion"
+    ),
+)
+async def query_stream_endpoint(
+    request: QueryRequest,
+    service: AdaptiveRAGService = Depends(get_adaptive_rag_service),
+) -> StreamingResponse:
+    """
+    POST /query/stream
+
+    Same request body as POST /query. Returns a Server-Sent Events stream
+    instead of a JSON body. The client should listen for:
+      - ``event: metadata``  (received once, before tokens)
+      - ``event: token``     (received 0..N times)
+      - ``event: error``     (terminal, if the pipeline fails)
+      - ``event: done``      (terminal, on success)
+
+    Example client (JavaScript):
+        const es = new EventSource("/query/stream");
+        es.addEventListener("token", (e) => console.log(e.data));
+        es.addEventListener("done", (e) => es.close());
+    """
+    logger.info("POST /query/stream | question='%s'", request.question[:120])
+
+    def event_stream():
+        """
+        Synchronous generator that yields SSE-formatted lines.
+
+        Yields:
+            Lines in SSE format: event + data fields, double-newline separated.
+        """
+        for event in service.stream_query(
+            question=request.question,
+            top_k=request.top_k,
+        ):
+            data = json.dumps(event["data"], ensure_ascii=False, default=str)
+            yield f"event: {event['event']}\ndata: {data}\n\n"
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
