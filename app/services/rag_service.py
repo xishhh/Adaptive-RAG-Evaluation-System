@@ -26,12 +26,12 @@ from __future__ import annotations
 import logging
 
 from langchain_core.messages import HumanMessage, SystemMessage
-from langchain_openai import ChatOpenAI
 
 from app.models.responses import ChunkResult, QueryResponse
 from app.retrievers.retriever import Retriever
 from app.services.citation_service import CitationService
 from app.utils.config import get_settings
+from app.utils.llm_factory import create_llm_with_fallback
 from app.vectorstore.chroma_manager import ChromaManager
 
 logger = logging.getLogger(__name__)
@@ -76,11 +76,8 @@ class RAGService:
         self._retriever = Retriever(chroma_manager=chroma_manager, default_top_k=top_k)
         self._citation_service = CitationService()
 
-        self._llm = ChatOpenAI(
-            model=settings.LLM_MODEL,
-            openai_api_key=settings.OPENAI_API_KEY,
-            openai_api_base=settings.OPENAI_API_BASE,
-            temperature=0.0,   # deterministic answers for a QA system
+        self._llm = create_llm_with_fallback(
+            temperature=0.0,
             max_tokens=1024,
         )
 
@@ -175,3 +172,34 @@ class RAGService:
 
         # LangChain's ChatOpenAI returns an AIMessage; .content is the string.
         return response.content.strip()
+
+    def _stream_llm(self, question: str, context: str):
+        """
+        Stream LLM-generated tokens for a question + context pair.
+
+        Yields content tokens as they are produced by the model.
+        Uses LangChain's ChatOpenAI.stream() for token-level streaming.
+
+        Args:
+            question: The user's question.
+            context:  Formatted context block from CitationService.
+
+        Yields:
+            Non-empty content strings, one per stream chunk.
+        """
+        human_content = (
+            f"Context:\n{context}\n\n"
+            f"Question: {question}"
+        )
+
+        messages = [
+            SystemMessage(content=_SYSTEM_PROMPT),
+            HumanMessage(content=human_content),
+        ]
+
+        logger.debug("Streaming LLM | model messages assembled.")
+
+        for chunk in self._llm.stream(messages):
+            token = chunk.content
+            if token:
+                yield token

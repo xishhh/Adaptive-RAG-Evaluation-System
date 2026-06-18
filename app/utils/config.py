@@ -43,6 +43,13 @@ class Settings(BaseSettings):
     OPENAI_API_KEY: str = ""
     OPENAI_API_BASE: str = "https://openrouter.ai/api/v1"
     LLM_MODEL: str = "gpt-4o-mini"
+    LLM_MODELS: str = ""
+    """
+    Comma-separated list of models for fallback.
+    The first entry is the primary model; subsequent entries are
+    fallbacks tried in order on failure.
+    If left empty, LLM_MODEL is used as a single model (no fallback).
+    """
     EMBEDDING_MODEL: str = "text-embedding-3-small"
 
     # ------------------------------------------------------------------
@@ -56,6 +63,7 @@ class Settings(BaseSettings):
     # ------------------------------------------------------------------
     CHUNK_SIZE: int = 512
     CHUNK_OVERLAP: int = 64
+    EMBED_BATCH_SIZE: int = 50
     RAW_DOCUMENTS_DIR: str = "./data/raw_documents"
     PROCESSED_DOCUMENTS_DIR: str = "./data/processed_documents"
 

@@ -30,8 +30,8 @@ import json
 import logging
 from typing import Literal
 
+from langchain_core.language_models import BaseLanguageModel
 from langchain_core.messages import HumanMessage, SystemMessage
-from langchain_openai import ChatOpenAI
 
 logger = logging.getLogger(__name__)
 
@@ -59,16 +59,16 @@ class QueryClassifier:
     Classifies a user query into DIRECT_LLM or KNOWLEDGE_QUERY.
 
     Args:
-        llm: An initialised LangChain ChatOpenAI instance.
-             Injected rather than constructed internally for testability.
+        llm: An initialised LangChain language model instance.
+             Can be a ``ChatOpenAI`` or a runnable with fallbacks.
 
     Usage:
-        classifier = QueryClassifier(llm=ChatOpenAI(...))
+        classifier = QueryClassifier(llm=create_llm_with_fallback())
         query_type = classifier.classify("What is the termination clause?")
         # → "KNOWLEDGE_QUERY"
     """
 
-    def __init__(self, llm: ChatOpenAI) -> None:
+    def __init__(self, llm: BaseLanguageModel) -> None:
         self._llm = llm
 
     def classify(self, query: str) -> QueryType:

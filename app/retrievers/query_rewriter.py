@@ -36,8 +36,8 @@ from __future__ import annotations
 
 import logging
 
+from langchain_core.language_models import BaseLanguageModel
 from langchain_core.messages import HumanMessage, SystemMessage
-from langchain_openai import ChatOpenAI
 
 logger = logging.getLogger(__name__)
 
@@ -63,15 +63,16 @@ class QueryRewriter:
     Rewrites a user query into an expanded, retrieval-optimised search string.
 
     Args:
-        llm: An initialised LangChain ChatOpenAI instance.
+        llm: An initialised LangChain language model instance.
+             Can be a ``ChatOpenAI`` or a runnable with fallbacks.
 
     Usage:
-        rewriter = QueryRewriter(llm=ChatOpenAI(...))
+        rewriter = QueryRewriter(llm=create_llm_with_fallback())
         expanded = rewriter.rewrite("What penalties exist?")
         # → "Penalty clauses, liquidated damages, delayed delivery penalties …"
     """
 
-    def __init__(self, llm: ChatOpenAI) -> None:
+    def __init__(self, llm: BaseLanguageModel) -> None:
         self._llm = llm
 
     def rewrite(self, query: str) -> str:
