@@ -32,19 +32,44 @@ from pydantic import BaseModel, Field
 # =============================================================================
 
 class UploadResponse(BaseModel):
-    """Response returned after a successful document ingestion."""
+    """Response returned immediately after an upload request is accepted.
 
-    filename: str = Field(..., description="Original filename of the uploaded document.")
-    chunks_stored: int = Field(..., description="Number of chunks stored in ChromaDB.", ge=0)
-    message: str = Field(..., description="Human-readable status message.")
+    Actual document processing (loading, chunking, embedding, storage) runs
+    in the background. The caller can check GET /upload/status/{job_id} for
+    the current state.
+    """
+
+    job_id: str = Field(..., description="Unique identifier for this ingestion job.")
+    filename: str = Field(
+        ..., description="Original filename of the uploaded document."
+    )
+    status: str = Field(
+        ...,
+        description="Processing status. Always 'processing' on acceptance.",
+        examples=["processing"],
+    )
 
     model_config = {"json_schema_extra": {
         "example": {
+            "job_id": "a1b2c3d4e5f6...",
             "filename": "contract_a.pdf",
-            "chunks_stored": 42,
-            "message": "Successfully ingested 'contract_a.pdf' into the knowledge base.",
+            "status": "processing",
         }
     }}
+
+
+class IngestionStatusResponse(BaseModel):
+    """Response returned by GET /upload/status/{job_id}."""
+
+    job_id: str = Field(..., description="Unique identifier for the ingestion job.")
+    status: str = Field(
+        ...,
+        description="Current processing status.",
+        examples=["processing", "completed", "failed"],
+    )
+    error: Optional[str] = Field(
+        None, description="Error message if the job failed."
+    )
 
 
 # =============================================================================

@@ -1,41 +1,33 @@
-# app/api/upload.py
 """
 app/api/upload.py
 
-POST /upload endpoint.
+POST /upload and GET /upload/status/{job_id} endpoints.
 
-Accepts a document file, runs it through the ingestion pipeline
-(load → chunk), then stores the resulting chunks in ChromaDB via ChromaManager.
+Upload accepts a document file and kicks off asynchronous ingestion in the
+background. The endpoint returns immediately; all processing (loading,
+chunking, embedding, ChromaDB storage, optional eval dataset generation)
+happens via FastAPI BackgroundTasks.
 
-Phase 3 change:
-- ChromaManager.add_chunks() replaces the Phase 2 stub that returned chunks
-  without storing them anywhere.
-
-Phase 6 change:
-- EvalDatasetGenerator.generate_from_chunks() is called after ChromaDB
-  storage to automatically produce evaluation Q&A samples for every
-  ingested document. Failures here are non-fatal and never affect the
-  upload response.
+The status endpoint lets callers poll for job completion without adding
+an external database — state is kept in an in-memory IngestionTracker.
 """
 
 import logging
-import tempfile
+import uuid
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, UploadFile, status
 
-from app.api.dependencies import get_chroma_manager, get_eval_generator
-from app.evaluators.eval_dataset_generator import EvalDatasetGenerator
-from app.ingestion.chunker import DocumentChunker
-from app.ingestion.loaders import DocumentLoader
-from app.models.responses import UploadResponse
-from app.vectorstore.chroma_manager import ChromaManager
+from app.api.dependencies import get_ingestion_service, get_ingestion_tracker
+from app.ingestion.ingestion_service import DocumentIngestionService
+from app.models.responses import IngestionStatusResponse, UploadResponse
+from app.services.ingestion_tracker import IngestionTracker
+from app.utils.config import get_settings
+from app.utils.helpers import get_file_extension
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
-
-
 
 SUPPORTED_EXTENSIONS = {".pdf", ".docx", ".txt", ".xlsx"}
 
@@ -47,122 +39,109 @@ SUPPORTED_EXTENSIONS = {".pdf", ".docx", ".txt", ".xlsx"}
     summary="Upload and ingest a document",
     description=(
         "Accepts a PDF, DOCX, TXT, or XLSX file. "
-        "Extracts text, splits into chunks, generates embeddings, "
-        "and stores everything in the ChromaDB vector database."
+        "Returns immediately and processes the document in the background: "
+        "extracts text, splits into chunks, generates embeddings, "
+        "and stores everything in the ChromaDB vector database. "
+        "Re-uploading the same filename replaces the existing vectors. "
+        "Use GET /upload/status/{job_id} to poll for completion."
     ),
 )
 async def upload_document(
     file: UploadFile,
-    chroma_manager: ChromaManager = Depends(get_chroma_manager),
-    eval_generator: EvalDatasetGenerator = Depends(get_eval_generator),
+    background_tasks: BackgroundTasks,
+    ingestion_service: DocumentIngestionService = Depends(get_ingestion_service),
+    tracker: IngestionTracker = Depends(get_ingestion_tracker),
 ) -> UploadResponse:
     """
-    Ingest a document into the vector knowledge base.
+    Accept a document for ingestion.
 
-    Steps:
-    1. Validate file type.
-    2. Save to a temp file (loaders need a filesystem path).
-    3. Load and extract text via DocumentLoader.
-    4. Chunk text via DocumentChunker.
-    5. Store chunks + embeddings in ChromaDB.
-    6. Generate evaluation Q&A samples (non-fatal if it fails).
-    7. Return ingestion summary.
+    The endpoint returns immediately with a job_id. The full ingestion
+    pipeline runs as a FastAPI BackgroundTask to avoid blocking the
+    client while embeddings are generated and ChromaDB is written.
     """
-    # --- 1. Validate ---
-    suffix = Path(file.filename or "").suffix.lower()
-    if suffix not in SUPPORTED_EXTENSIONS:
+    # --- 1. Validate file type ---
+    original_filename = file.filename or "unknown"
+    ext = get_file_extension(original_filename)
+
+    if ext not in SUPPORTED_EXTENSIONS:
         raise HTTPException(
             status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
             detail=(
-                f"Unsupported file type '{suffix}'. "
+                f"Unsupported file type '{ext}'. "
                 f"Supported types: {sorted(SUPPORTED_EXTENSIONS)}"
             ),
         )
 
-    logger.info("Received upload: '%s'", file.filename)
+    logger.info("Received upload: '%s'", original_filename)
 
-    # --- 2. Write to temp file ---
+    # --- 2. Create job & persist file ---
+    # The file is saved with a UUID prefix to prevent filename collisions
+    # when multiple uploads arrive with the same name.  The original
+    # filename is preserved in metadata / the tracker for display.
+    job_id = tracker.create_job(original_filename)
+
+    settings = get_settings()
+    raw_dir = Path(settings.RAW_DOCUMENTS_DIR)
+    raw_dir.mkdir(parents=True, exist_ok=True)
+
+    save_path = raw_dir / f"{job_id}{ext}"
+
     try:
-        with tempfile.NamedTemporaryFile(
-            suffix=suffix, delete=False
-        ) as tmp:
-            content = await file.read()
-            tmp.write(content)
-            tmp_path = Path(tmp.name)
+        content = await file.read()
+        save_path.write_bytes(content)
     except OSError as exc:
-        logger.exception("Failed to write temp file for '%s'.", file.filename)
+        tracker.mark_failed(job_id, str(exc))
+        logger.exception("Failed to save '%s'.", original_filename)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to save uploaded file.",
         ) from exc
 
-    # --- 3 & 4. Load → Chunk ---
-    try:
-        loader = DocumentLoader()
-        raw_doc = loader.load(tmp_path)
-
-        chunker = DocumentChunker()
-        chunks = chunker.chunk(raw_doc)
-    except ValueError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail=str(exc),
-        ) from exc
-    except Exception as exc:
-        logger.exception("Ingestion pipeline failed for '%s'.", file.filename)
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Document processing failed.",
-        ) from exc
-    finally:
-        # Clean up temp file regardless of outcome.
-        tmp_path.unlink(missing_ok=True)
-
-    if not chunks:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail="No text content could be extracted from the document.",
-        )
-
-    try:
-        stored_count = chroma_manager.add_chunks(
-            [chunk.model_dump() for chunk in chunks]
-        )
-    except Exception as exc:
-        logger.exception("ChromaDB storage failed for '%s'.", file.filename)
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to store document in vector database.",
-        ) from exc
-
-    # --- 6. Generate evaluation dataset (non-fatal) ---
-    try:
-        samples_written = eval_generator.generate_from_chunks(
-            chunks=chunks,
-            document_name=file.filename or "unknown",
-        )
-        logger.info(
-            "Eval dataset generation | file='%s' | samples_written=%d",
-            file.filename,
-            samples_written,
-        )
-    except Exception as exc:
-        # Generation failure must never fail the upload.
-        # The document is already safely stored in ChromaDB at this point.
-        logger.error(
-            "Eval dataset generation failed for '%s' (upload still succeeded): %s",
-            file.filename,
-            exc,
-        )
-
     logger.info(
-        "Ingestion complete | file='%s' | chunks=%d",
-        file.filename,
-        stored_count,
+        "Saved '%s' to '%s' | job_id=%s",
+        original_filename,
+        save_path,
+        job_id,
+    )
+
+    # --- 3. Schedule background ingestion ---
+    background_tasks.add_task(
+        ingestion_service.process_document,
+        file_path=save_path,
+        original_filename=original_filename,
+        job_id=job_id,
     )
 
     return UploadResponse(
-        filename=file.filename or "unknown",
-        chunks_stored=stored_count,
-        message=f"Successfully ingested '{file.filename}' into the knowledge base.",
+        job_id=job_id,
+        filename=original_filename,
+        status="processing",
+    )
+
+
+@router.get(
+    "/upload/status/{job_id}",
+    response_model=IngestionStatusResponse,
+    summary="Poll ingestion job status",
+    description=(
+        "Returns the current status of a background ingestion job. "
+        "Possible values: 'processing', 'completed', 'failed'."
+    ),
+)
+async def get_ingestion_status(
+    job_id: str,
+    tracker: IngestionTracker = Depends(get_ingestion_tracker),
+) -> IngestionStatusResponse:
+    """Return the current status of an ingestion job."""
+    job = tracker.get_job(job_id)
+    if job is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Ingestion job '{job_id}' not found.",
+        )
+
+    return IngestionStatusResponse(
+        job_id=job["job_id"],
+        status=job["status"],
+        error=job.get("error"),
     )
