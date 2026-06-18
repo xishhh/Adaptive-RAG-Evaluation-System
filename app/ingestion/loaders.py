@@ -1,4 +1,6 @@
 """
+app/ingestion/loaders.py
+
 Document loaders for the Adaptive RAG ingestion pipeline.
 
 Responsibilities:
@@ -12,6 +14,14 @@ Supported formats:
   - DOCX  → python-docx (preserves paragraph structure)
   - TXT   → built-in    (UTF-8 with Latin-1 fallback)
   - XLSX  → openpyxl    (row-level text extraction per sheet)
+
+Fix #1 — Wrong document_name stored in ChromaDB:
+  load() now accepts an optional `original_filename` parameter.
+  When provided, it is used as `document_name` in the returned RawDocument
+  instead of path.name. This ensures that when the API writes the upload
+  to a NamedTemporaryFile (e.g. /tmp/tmpabc123.pdf), the user's real
+  filename ("contract_a.pdf") is what gets stored in ChromaDB — not the
+  temp name that disappears after the request.
 
 This module does NOT produce embeddings or interact with ChromaDB.
 Those responsibilities belong to Phase 3.
@@ -46,23 +56,39 @@ class DocumentLoader:
 
     Usage:
         loader = DocumentLoader()
-        raw_doc = loader.load("/path/to/file.pdf")
+
+        # When loading from disk with the real filename available:
+        raw_doc = loader.load("/tmp/tmpabc123.pdf", original_filename="contract_a.pdf")
+
+        # When loading a file whose path IS the real name:
+        raw_doc = loader.load("/path/to/contract_a.pdf")
     """
 
-    def load(self, file_path: str | Path) -> RawDocument:
+    def load(
+        self,
+        file_path: str | Path,
+        original_filename: str | None = None,
+    ) -> RawDocument:
         """
         Load a document from disk and return a RawDocument.
 
         Args:
-            file_path: Absolute or relative path to the document.
+            file_path:         Absolute or relative path to the document on disk.
+                               May be a temp file path.
+            original_filename: The user-facing filename (e.g. "contract_a.pdf").
+                               When provided, this overrides path.name as the
+                               document_name stored in RawDocument and eventually
+                               ChromaDB. If None, path.name is used as-is.
 
         Returns:
             RawDocument with extracted text and metadata.
+            RawDocument.document_name is always the user-facing filename,
+            never a temp path name.
 
         Raises:
-            FileNotFoundError: If the file does not exist.
+            FileNotFoundError:      If the file does not exist on disk.
             UnsupportedFileTypeError: If the extension is not supported.
-            ValueError: If text extraction yields no content.
+            ValueError:             If text extraction yields no content.
         """
         path = Path(file_path).resolve()
 
@@ -77,7 +103,16 @@ class DocumentLoader:
                 f"Supported: {sorted(SUPPORTED_EXTENSIONS)}"
             )
 
-        logger.info("Loading document: %s (type=%s)", path.name, extension)
+        # Fix #1: Use the caller-supplied original filename when available.
+        # This is the name that will flow through chunking and into ChromaDB.
+        document_name = original_filename if original_filename else path.name
+
+        logger.info(
+            "Loading document: '%s' from path '%s' (type=%s)",
+            document_name,
+            path.name,
+            extension,
+        )
 
         dispatch: dict[str, Any] = {
             "pdf": self._load_pdf,
@@ -86,17 +121,17 @@ class DocumentLoader:
             "xlsx": self._load_xlsx,
         }
 
-        raw_doc: RawDocument = dispatch[extension](path)
+        raw_doc: RawDocument = dispatch[extension](path, document_name)
 
         if not raw_doc.full_text.strip():
             raise ValueError(
-                f"No text could be extracted from '{path.name}'. "
+                f"No text could be extracted from '{document_name}'. "
                 "The file may be empty, image-only, or corrupted."
             )
 
         logger.info(
             "Loaded '%s' — %d characters extracted.",
-            path.name,
+            document_name,
             len(raw_doc.full_text),
         )
         return raw_doc
@@ -105,7 +140,7 @@ class DocumentLoader:
     # PDF                                                                  #
     # ------------------------------------------------------------------ #
 
-    def _load_pdf(self, path: Path) -> RawDocument:
+    def _load_pdf(self, path: Path, document_name: str) -> RawDocument:
         """
         Extract text from a PDF using pdfplumber.
 
@@ -116,6 +151,10 @@ class DocumentLoader:
         Each page's text is joined with a newline. Page boundaries are
         preserved in the metadata so the chunker can annotate chunks
         with approximate page numbers.
+
+        Args:
+            path:          Filesystem path to the PDF file.
+            document_name: User-facing filename to store in the RawDocument.
         """
         pages_text: list[str] = []
         page_char_offsets: list[int] = []  # cumulative char offset per page
@@ -139,7 +178,7 @@ class DocumentLoader:
         }
 
         return RawDocument(
-            document_name=path.name,
+            document_name=document_name,
             file_type="pdf",
             full_text=full_text,
             metadata=metadata,
@@ -149,7 +188,7 @@ class DocumentLoader:
     # DOCX                                                                 #
     # ------------------------------------------------------------------ #
 
-    def _load_docx(self, path: Path) -> RawDocument:
+    def _load_docx(self, path: Path, document_name: str) -> RawDocument:
         """
         Extract text from a Word document using python-docx.
 
@@ -159,6 +198,10 @@ class DocumentLoader:
         DOCX files do not have a reliable page-number concept at the
         paragraph level without rendering the document, so page_number
         will be None for all DOCX chunks.
+
+        Args:
+            path:          Filesystem path to the DOCX file.
+            document_name: User-facing filename to store in the RawDocument.
         """
         doc = DocxDocument(str(path))
 
@@ -190,7 +233,7 @@ class DocumentLoader:
         }
 
         return RawDocument(
-            document_name=path.name,
+            document_name=document_name,
             file_type="docx",
             full_text=full_text,
             metadata=metadata,
@@ -200,18 +243,22 @@ class DocumentLoader:
     # TXT                                                                  #
     # ------------------------------------------------------------------ #
 
-    def _load_txt(self, path: Path) -> RawDocument:
+    def _load_txt(self, path: Path, document_name: str) -> RawDocument:
         """
         Read a plain text file.
 
         Attempts UTF-8 first; falls back to Latin-1 to handle
         legacy documents without raising an encoding error.
+
+        Args:
+            path:          Filesystem path to the TXT file.
+            document_name: User-facing filename to store in the RawDocument.
         """
         try:
             full_text = path.read_text(encoding="utf-8")
         except UnicodeDecodeError:
             logger.warning(
-                "'%s' is not valid UTF-8; falling back to Latin-1.", path.name
+                "'%s' is not valid UTF-8; falling back to Latin-1.", document_name
             )
             full_text = path.read_text(encoding="latin-1")
 
@@ -221,7 +268,7 @@ class DocumentLoader:
         }
 
         return RawDocument(
-            document_name=path.name,
+            document_name=document_name,
             file_type="txt",
             full_text=full_text,
             metadata=metadata,
@@ -231,7 +278,7 @@ class DocumentLoader:
     # XLSX                                                                 #
     # ------------------------------------------------------------------ #
 
-    def _load_xlsx(self, path: Path) -> RawDocument:
+    def _load_xlsx(self, path: Path, document_name: str) -> RawDocument:
         """
         Extract text from an Excel workbook using openpyxl.
 
@@ -246,6 +293,10 @@ class DocumentLoader:
 
         Excel does not have a page-number concept, so page_number will
         be None for all XLSX chunks.
+
+        Args:
+            path:          Filesystem path to the XLSX file.
+            document_name: User-facing filename to store in the RawDocument.
         """
         wb = load_workbook(filename=str(path), read_only=True, data_only=True)
         sheet_texts: list[str] = []
@@ -275,7 +326,7 @@ class DocumentLoader:
         }
 
         return RawDocument(
-            document_name=path.name,
+            document_name=document_name,
             file_type="xlsx",
             full_text=full_text,
             metadata=metadata,
