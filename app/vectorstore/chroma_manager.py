@@ -6,8 +6,20 @@ similarity search, and metadata filtering.
 
 This module is the single point of contact between the application and ChromaDB.
 No other module should import chromadb directly.
+
+Fix #5 — Re-upload creates duplicate vector entries:
+  Added delete_by_document_name(document_name) which removes all existing
+  chunks for a given document before a re-ingest. Called from upload.py
+  before add_chunks() so re-uploads replace rather than stack.
+
+Fix #11 — chunk_text duplicated in Chroma metadata:
+  Removed "chunk_text" from combined_metadata inside add_chunks(). The text
+  is already stored in the `documents` field of the ChromaDB record. Storing
+  it again in metadata doubles the on-disk size per chunk and can cause
+  Chroma metadata-size rejections on large chunks.
 """
 
+import json
 import logging
 from typing import Any, Optional
 
@@ -29,6 +41,7 @@ class ChromaManager:
     Responsibilities:
     - Initialize and persist a ChromaDB collection.
     - Add document chunks with embeddings and metadata.
+    - Delete all chunks for a given document (for idempotent re-upload).
     - Perform similarity searches and return structured results.
     - Support metadata filtering for targeted retrieval.
 
@@ -41,9 +54,9 @@ class ChromaManager:
 
     def __init__(self) -> None:
         self._embedding_fn = OpenAIEmbeddings(
-        model=settings.EMBEDDING_MODEL,
-        openai_api_key=settings.OPENAI_API_KEY,
-        openai_api_base=settings.OPENAI_API_BASE,  # Override API Base
+            model=settings.EMBEDDING_MODEL,
+            openai_api_key=settings.OPENAI_API_KEY,
+            openai_api_base=settings.OPENAI_API_BASE,
         )
 
         self._client = chromadb.PersistentClient(
@@ -87,16 +100,59 @@ class ChromaManager:
         try:
             self._client.delete_collection(settings.CHROMA_COLLECTION_NAME)
         except Exception:
-                logger.warning(
-                    "Collection '%s' did not exist or could not be deleted cleanly.",
-                    settings.CHROMA_COLLECTION_NAME,
-                )
+            logger.warning(
+                "Collection '%s' did not exist or could not be deleted cleanly.",
+                settings.CHROMA_COLLECTION_NAME,
+            )
 
         self._collection = self._get_or_create_collection()
 
     # ------------------------------------------------------------------
     # Write operations
     # ------------------------------------------------------------------
+
+    def delete_by_document_name(self, document_name: str) -> int:
+        """
+        Delete all chunks belonging to the given document.
+
+        Fix #5: Called from upload.py before add_chunks() so that
+        re-uploading the same file replaces its vectors rather than
+        creating a second set, which would cause the same passages to
+        be retrieved multiple times and degrade answer quality.
+
+        Args:
+            document_name: The user-facing filename (e.g. "contract_a.pdf").
+                           Must match the value stored in the `document_name`
+                           metadata field during ingestion.
+
+        Returns:
+            Number of chunks deleted (0 if the document was not found).
+        """
+        if not document_name:
+            return 0
+
+        # Fetch all IDs for this document_name via a metadata filter.
+        # We use get() instead of query() because we don't need embeddings —
+        # we only need the IDs to delete.
+        result = self._collection.get(
+            where={"document_name": document_name},
+            include=[],  # IDs only — no need to fetch text or embeddings
+        )
+
+        ids_to_delete: list[str] = result.get("ids", [])
+        if not ids_to_delete:
+            logger.debug(
+                "delete_by_document_name: no chunks found for '%s'.", document_name
+            )
+            return 0
+
+        self._collection.delete(ids=ids_to_delete)
+        logger.info(
+            "Deleted %d existing chunk(s) for document '%s'.",
+            len(ids_to_delete),
+            document_name,
+        )
+        return len(ids_to_delete)
 
     def add_chunks(self, chunks: list[dict[str, Any]]) -> int:
         """
@@ -114,9 +170,11 @@ class ChromaManager:
 
         Notes:
         - Chunks are embedded in a single batch call for efficiency.
-        - ChromaDB uses `ids` as the deduplication key. Re-adding the same
-          chunk_id will raise a DuplicateIDError; callers should guard against
-          re-ingesting the same document without resetting first.
+        - Fix #11: chunk_text is NOT stored in metadata. It is already stored
+          in the `documents` field of the ChromaDB record. Storing it twice
+          doubled on-disk size and risked hitting Chroma's metadata size limits.
+        - Callers should call delete_by_document_name() before this method
+          if the document may already exist (Fix #5).
         """
         if not chunks:
             logger.warning("add_chunks called with empty list — skipping.")
@@ -130,22 +188,22 @@ class ChromaManager:
             ids.append(chunk["chunk_id"])
             documents.append(chunk["chunk_text"])
 
-            # Retrieve the full metadata dict from the Chunk object.
+            # Retrieve the nested metadata dict from the Chunk object.
             chunk_metadata = chunk.get("metadata", {})
 
-            # Combine the nested metadata with the explicit chunk fields,
-            # then sanitize so only ChromaDB-safe scalar values remain.
+            # Combine nested metadata with explicit chunk fields.
+            # Fix #11: "chunk_text" is intentionally excluded from metadata.
+            # It lives in the `documents` field; duplicating it here wastes
+            # storage and can exceed ChromaDB's per-record metadata size limit.
             combined_metadata = {
                 **chunk_metadata,
                 "document_name": chunk["document_name"],
                 "chunk_id": chunk["chunk_id"],
                 "page_number": chunk.get("page_number") or 0,
                 "chunk_index": chunk.get("chunk_index", 0),
-                "chunk_text": chunk["chunk_text"],
+                # chunk_text deliberately omitted — stored in `documents` field
             }
             metadatas.append(self._sanitize_metadata(combined_metadata))
-
-            
 
         logger.info("Generating embeddings for %d chunks …", len(chunks))
         embeddings = self._embedding_fn.embed_documents(documents)
@@ -181,16 +239,13 @@ class ChromaManager:
 
         Returns:
             List of result dicts, each containing:
-                chunk_id      (str)
-                chunk_text    (str)
-                document_name (str)
-                page_number   (int)
-                chunk_index   (int)
-                distance      (float)  — lower = more similar (cosine distance)
+                chunk_id        (str)
+                chunk_text      (str)
+                document_name   (str)
+                page_number     (int)
+                chunk_index     (int)
+                distance        (float) — lower = more similar (cosine distance)
                 relevance_score (float) — 1 - distance, higher = more similar
-
-        Raises:
-            ValueError: If the collection is empty and a search is attempted.
         """
         count = self._collection.count()
         if count == 0:
@@ -262,8 +317,6 @@ class ChromaManager:
         - list/dict → JSON-serialised string
         - Everything else → str(value)
         """
-        import json
-
         safe: dict[str, Any] = {}
         for key, value in metadata.items():
             if isinstance(value, (str, int, float, bool)):
