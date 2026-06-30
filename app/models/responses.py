@@ -1,84 +1,25 @@
-"""
-app/models/responses.py
-
-Pydantic response models for all API endpoints.
-
-Phase 3 additions:
-- UploadResponse: now includes chunks_stored count.
-- CollectionStatsResponse: ChromaDB collection state for /health.
-- ChunkResult: represents a single retrieved chunk from ChromaDB.
-
-Phase 4 additions:
-- QueryResponse: completed with question, answer, and sources fields.
-
-Phase 5 additions:
-- AdaptiveQueryResponse: extends QueryResponse with adaptive pipeline
-  metadata so callers can observe exactly what the pipeline decided:
-  query_type, rewritten_query, and retrieval_strategy.
-
-Phase 6 additions:
-- EvaluationResponse: completed with all fields from a finished run.
-- EvaluationRunRecord: a single historical run summary for GET /metrics.
-- MetricsSummaryResponse: aggregate + history payload for GET /metrics.
-"""
-
 from typing import Any, Literal, Optional
 
 from pydantic import BaseModel, Field
 
 
-# =============================================================================
-# Upload
-# =============================================================================
-
 class UploadResponse(BaseModel):
-    """Response returned immediately after an upload request is accepted.
-
-    Actual document processing (loading, chunking, embedding, storage) runs
-    in the background. The caller can check GET /upload/status/{job_id} for
-    the current state.
-    """
-
     job_id: str = Field(..., description="Unique identifier for this ingestion job.")
-    filename: str = Field(
-        ..., description="Original filename of the uploaded document."
-    )
-    status: str = Field(
-        ...,
-        description="Processing status. Always 'processing' on acceptance.",
-        examples=["processing"],
-    )
+    filename: str = Field(..., description="Original filename of the uploaded document.")
+    status: str = Field(..., description="Processing status.", examples=["processing"])
 
     model_config = {"json_schema_extra": {
-        "example": {
-            "job_id": "a1b2c3d4e5f6...",
-            "filename": "contract_a.pdf",
-            "status": "processing",
-        }
+        "example": {"job_id": "a1b2c3d4e5f6...", "filename": "contract_a.pdf", "status": "processing"}
     }}
 
 
 class IngestionStatusResponse(BaseModel):
-    """Response returned by GET /upload/status/{job_id}."""
-
     job_id: str = Field(..., description="Unique identifier for the ingestion job.")
-    status: str = Field(
-        ...,
-        description="Current processing status.",
-        examples=["processing", "completed", "failed"],
-    )
-    error: Optional[str] = Field(
-        None, description="Error message if the job failed."
-    )
+    status: str = Field(..., description="Current processing status.", examples=["processing", "completed", "failed"])
+    error: Optional[str] = Field(None, description="Error message if the job failed.")
 
-
-# =============================================================================
-# Query
-# =============================================================================
 
 class ChunkResult(BaseModel):
-    """A single retrieved chunk from ChromaDB."""
-
     chunk_id: str = Field(..., description="Unique identifier for this chunk.")
     chunk_text: str = Field(..., description="Raw text of the chunk.")
     document_name: str = Field(..., description="Source document filename.")
@@ -90,68 +31,34 @@ class ChunkResult(BaseModel):
 
 
 class QueryResponse(BaseModel):
-    """Response returned after a basic RAG question-answering request."""
-
     question: str = Field(..., description="The original question asked by the user.")
     answer: str = Field(..., description="The generated answer.")
-    sources: list[ChunkResult] = Field(
-        default_factory=list, description="Chunks used to generate the answer."
-    )
+    sources: list[ChunkResult] = Field(default_factory=list, description="Chunks used to generate the answer.")
 
     model_config = {"json_schema_extra": {
         "example": {
             "question": "What is the termination clause?",
-            "answer": "The contract may be terminated with 30 days' written notice …",
+            "answer": "The contract may be terminated with 30 days' written notice ...",
             "sources": [],
         }
     }}
 
 
 class AdaptiveQueryResponse(QueryResponse):
-    """
-    Response returned after an adaptive RAG question-answering request.
-
-    Extends QueryResponse with observability fields that expose what the
-    adaptive pipeline decided:
-
-    - query_type:          Whether retrieval was needed at all.
-    - rewritten_query:     The expanded query used for re-retrieval, if triggered.
-    - retrieval_strategy:  A short label describing the path taken through the
-                           adaptive pipeline. Useful for debugging and evaluation.
-
-    Possible retrieval_strategy values:
-        "direct_llm"          — No retrieval; answered directly by the LLM.
-        "single_retrieval"    — Retrieval ran once and confidence was sufficient.
-        "rewritten_retrieval" — Low confidence triggered rewrite + re-retrieval.
-    """
-
     query_type: Literal["DIRECT_LLM", "KNOWLEDGE_QUERY"] = Field(
-        ...,
-        description=(
-            "Classification of the incoming query. "
-            "'DIRECT_LLM' means the question was answered without retrieval. "
-            "'KNOWLEDGE_QUERY' means the vector store was consulted."
-        ),
+        ..., description="Classification of the incoming query."
     )
     rewritten_query: Optional[str] = Field(
-        None,
-        description=(
-            "The expanded query generated by QueryRewriter if confidence was low. "
-            "None when the original query was sufficient."
-        ),
+        None, description="The expanded query from QueryRewriter if confidence was low."
     )
     retrieval_strategy: str = Field(
-        ...,
-        description=(
-            "Short label describing the adaptive path taken. "
-            "One of: 'direct_llm', 'single_retrieval', 'rewritten_retrieval'."
-        ),
+        ..., description="Short label describing the adaptive path taken."
     )
 
     model_config = {"json_schema_extra": {
         "example": {
             "question": "What penalties exist for delayed delivery?",
-            "answer": "According to contract_a.pdf, a penalty of 0.5% per day applies …",
+            "answer": "According to contract_a.pdf, a penalty of 0.5% per day applies ...",
             "sources": [],
             "query_type": "KNOWLEDGE_QUERY",
             "rewritten_query": "Penalty clauses, liquidated damages, delayed delivery penalties",
@@ -160,20 +67,7 @@ class AdaptiveQueryResponse(QueryResponse):
     }}
 
 
-# =============================================================================
-# Evaluation  (Phase 6)
-# =============================================================================
-
 class EvaluationResponse(BaseModel):
-    """
-    Response returned after a completed POST /evaluate run.
-
-    All four RAGAS metrics are nullable: a None value means RAGAS could
-    not compute that metric for this dataset (e.g. too few samples,
-    or the LLM returned an unusable response). Callers should treat None
-    as 'unavailable', not as 0.
-    """
-
     run_id: str = Field(..., description="Unique identifier for this evaluation run.")
     run_label: str = Field(..., description="Human-readable label supplied in the request.")
     dataset_path: str = Field(..., description="Path of the JSONL dataset that was evaluated.")
@@ -181,10 +75,7 @@ class EvaluationResponse(BaseModel):
     created_at: str = Field(..., description="ISO-8601 UTC timestamp of when the run completed.")
     metrics: dict[str, Any] = Field(
         default_factory=dict,
-        description=(
-            "RAGAS metric scores. Keys: context_precision, context_recall, "
-            "faithfulness, answer_relevancy. Values: float 0.0–1.0 or null."
-        ),
+        description="RAGAS metric scores. Values: float 0.0–1.0 or null.",
     )
     message: str = Field(..., description="Human-readable status message.")
 
@@ -195,24 +86,13 @@ class EvaluationResponse(BaseModel):
             "dataset_path": "data/evaluation_dataset/sample_eval.jsonl",
             "sample_count": 10,
             "created_at": "2024-06-15T14:30:22+00:00",
-            "metrics": {
-                "context_precision": 0.85,
-                "context_recall": 0.78,
-                "faithfulness": 0.91,
-                "answer_relevancy": 0.87,
-            },
+            "metrics": {"context_precision": 0.85, "context_recall": 0.78, "faithfulness": 0.91, "answer_relevancy": 0.87},
             "message": "Evaluation run 'contract_review' completed successfully.",
         }
     }}
 
 
 class EvaluationRunRecord(BaseModel):
-    """
-    A single historical evaluation run record, as returned by GET /metrics.
-
-    Mirrors what MetricsTracker persists to disk.
-    """
-
     run_id: str
     run_label: str
     dataset_path: str
@@ -222,46 +102,24 @@ class EvaluationRunRecord(BaseModel):
 
 
 class MetricsSummaryResponse(BaseModel):
-    """
-    Response returned by GET /metrics.
-
-    Provides:
-      - aggregate: mean of each metric across all historical runs.
-      - total_runs: how many evaluation runs have been recorded.
-      - runs: the most recent runs (up to 50), newest-first.
-    """
-
     total_runs: int = Field(..., description="Total number of evaluation runs recorded.")
     aggregate_metrics: dict[str, Any] = Field(
-        default_factory=dict,
-        description="Mean score per metric across all historical runs.",
+        default_factory=dict, description="Mean score per metric across all historical runs."
     )
     runs: list[EvaluationRunRecord] = Field(
-        default_factory=list,
-        description="Most recent evaluation runs, newest first (up to 50).",
+        default_factory=list, description="Most recent evaluation runs, newest first (up to 50)."
     )
 
     model_config = {"json_schema_extra": {
         "example": {
             "total_runs": 3,
-            "aggregate_metrics": {
-                "context_precision": 0.82,
-                "context_recall": 0.75,
-                "faithfulness": 0.89,
-                "answer_relevancy": 0.84,
-            },
+            "aggregate_metrics": {"context_precision": 0.82, "context_recall": 0.75, "faithfulness": 0.89, "answer_relevancy": 0.84},
             "runs": [],
         }
     }}
 
 
-# =============================================================================
-# Health
-# =============================================================================
-
 class CollectionStatsResponse(BaseModel):
-    """ChromaDB collection statistics returned by /health."""
-
     collection_name: str
     total_chunks: int
     persist_dir: str
@@ -269,13 +127,9 @@ class CollectionStatsResponse(BaseModel):
 
 
 class HealthResponse(BaseModel):
-    """Response returned by GET /health."""
-
     status: str = Field(..., description="'ok' when the service is healthy.")
     version: str = Field(..., description="API version string.")
-    vector_store: Optional[CollectionStatsResponse] = Field(
-        None, description="ChromaDB collection statistics."
-    )
+    vector_store: Optional[CollectionStatsResponse] = Field(None, description="ChromaDB collection statistics.")
 
     model_config = {"json_schema_extra": {
         "example": {

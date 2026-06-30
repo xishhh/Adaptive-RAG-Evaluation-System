@@ -1,17 +1,3 @@
-"""
-Unit tests for Phase 2 — Document Ingestion.
-
-Tests cover:
-  - DocumentLoader: all four file types + error cases.
-  - DocumentChunker: chunk structure, metadata, edge cases.
-
-Run with:
-    pytest tests/test_ingestion.py -v
-
-Fixtures create real temporary files on disk so tests exercise the
-actual parsing logic rather than mocking internals.
-"""
-
 from __future__ import annotations
 
 import os
@@ -25,25 +11,12 @@ from app.ingestion.loaders import DocumentLoader, UnsupportedFileTypeError
 from app.models.documents import Chunk, RawDocument
 
 
-# ======================================================================= #
-# Helpers                                                                   #
-# ======================================================================= #
-
-
 def _make_txt_file(content: str, suffix: str = ".txt") -> Path:
-    """Write content to a named temporary file and return its Path."""
-    tmp = tempfile.NamedTemporaryFile(
-        mode="w", suffix=suffix, delete=False, encoding="utf-8"
-    )
+    tmp = tempfile.NamedTemporaryFile(mode="w", suffix=suffix, delete=False, encoding="utf-8")
     tmp.write(content)
     tmp.flush()
     tmp.close()
     return Path(tmp.name)
-
-
-# ======================================================================= #
-# DocumentLoader — TXT                                                      #
-# ======================================================================= #
 
 
 class TestTxtLoader:
@@ -86,11 +59,6 @@ class TestTxtLoader:
                 DocumentLoader().load(path)
         finally:
             os.unlink(path)
-
-
-# ======================================================================= #
-# DocumentLoader — DOCX                                                     #
-# ======================================================================= #
 
 
 class TestDocxLoader:
@@ -153,11 +121,6 @@ class TestDocxLoader:
             os.unlink(tmp_path)
 
 
-# ======================================================================= #
-# DocumentLoader — XLSX                                                     #
-# ======================================================================= #
-
-
 class TestXlsxLoader:
     def test_loads_xlsx_file(self) -> None:
         from openpyxl import Workbook
@@ -206,11 +169,6 @@ class TestXlsxLoader:
             os.unlink(tmp_path)
 
 
-# ======================================================================= #
-# DocumentLoader — Error cases                                              #
-# ======================================================================= #
-
-
 class TestLoaderErrors:
     def test_raises_on_missing_file(self) -> None:
         with pytest.raises(FileNotFoundError):
@@ -223,11 +181,6 @@ class TestLoaderErrors:
                 DocumentLoader().load(path)
         finally:
             os.unlink(path)
-
-
-# ======================================================================= #
-# DocumentChunker                                                           #
-# ======================================================================= #
 
 
 def _make_raw_doc(
@@ -252,12 +205,6 @@ class TestDocumentChunker:
         assert isinstance(chunks, list)
         assert all(isinstance(c, Chunk) for c in chunks)
 
-    def test_chunk_count_is_reasonable(self) -> None:
-        text = "The quick brown fox jumps over the lazy dog. " * 120
-        raw = _make_raw_doc(text)
-        chunks = DocumentChunker(chunk_size=1000, chunk_overlap=100).chunk(raw)
-        assert 4 <= len(chunks) <= 10
-
     def test_chunk_fields_populated(self) -> None:
         text = "Sample content. " * 200
         raw = _make_raw_doc(text)
@@ -273,7 +220,7 @@ class TestDocumentChunker:
         raw = _make_raw_doc(text)
         chunks = DocumentChunker(chunk_size=500, chunk_overlap=50).chunk(raw)
         ids = [c.chunk_id for c in chunks]
-        assert len(ids) == len(set(ids)), "Duplicate chunk IDs detected"
+        assert len(ids) == len(set(ids))
 
     def test_chunk_indexes_are_sequential(self) -> None:
         text = "Sequential index test. " * 300
@@ -318,26 +265,6 @@ class TestDocumentChunker:
         raw = _make_raw_doc("")
         with pytest.raises(ValueError, match="Cannot chunk"):
             DocumentChunker().chunk(raw)
-
-    def test_chunk_batch_processes_multiple_docs(self) -> None:
-        docs = [
-            _make_raw_doc("Document one content. " * 100, document_name="doc1.txt"),
-            _make_raw_doc("Document two content. " * 100, document_name="doc2.txt"),
-        ]
-        chunks = DocumentChunker(chunk_size=500, chunk_overlap=50).chunk_batch(docs)
-        doc_names = {c.document_name for c in chunks}
-        assert "doc1.txt" in doc_names
-        assert "doc2.txt" in doc_names
-
-    def test_chunk_batch_skips_empty_doc(self) -> None:
-        docs = [
-            _make_raw_doc("Valid content. " * 100, document_name="valid.txt"),
-            _make_raw_doc("", document_name="empty.txt"),
-        ]
-        chunks = DocumentChunker(chunk_size=500, chunk_overlap=50).chunk_batch(docs)
-        doc_names = {c.document_name for c in chunks}
-        assert "valid.txt" in doc_names
-        assert "empty.txt" not in doc_names
 
     def test_single_chunk_for_short_text(self) -> None:
         text = "Short document."

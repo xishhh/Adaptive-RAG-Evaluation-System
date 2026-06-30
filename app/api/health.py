@@ -1,13 +1,3 @@
-"""
-app/api/health.py
-
-GET /health endpoint.
-
-Phase 3 change:
-- Now reports ChromaDB collection statistics so operators can verify
-  the vector store is live and contains the expected number of chunks.
-"""
-
 import logging
 
 from fastapi import APIRouter, Depends
@@ -23,8 +13,6 @@ router = APIRouter()
 settings = get_settings()
 
 
-
-
 @router.get(
     "/health",
     response_model=HealthResponse,
@@ -34,9 +22,6 @@ settings = get_settings()
 def health_check(
     chroma_manager: ChromaManager = Depends(get_chroma_manager),
 ) -> HealthResponse:
-    """
-    Verify the service is running and report vector store state.
-    """
     try:
         stats = chroma_manager.collection_stats()
         vector_store = CollectionStatsResponse(**stats)

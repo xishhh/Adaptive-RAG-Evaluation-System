@@ -1,7 +1,3 @@
-"""
-Internal document models used by ingestion and vector storage.
-"""
-
 from typing import Any
 
 from pydantic import BaseModel, Field

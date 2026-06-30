@@ -1,18 +1,3 @@
-"""
-app/main.py
-
-FastAPI application entry point.
-
-This module creates the FastAPI application instance, registers all API
-routers, and configures application-level middleware and lifecycle events.
-
-Run locally:
-    uvicorn app.main:app --reload
-
-Run in Docker:
-    CMD set in Dockerfile.
-"""
-
 from contextlib import asynccontextmanager
 from typing import AsyncGenerator
 
@@ -26,29 +11,17 @@ from app.utils.logger import get_logger
 logger = get_logger(__name__)
 
 
-# ── Lifespan ───────────────────────────────────────────────────────────────────
-
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
-    """
-    Application lifespan handler.
-
-    Code before ``yield`` runs on startup.
-    Code after ``yield`` runs on shutdown — all user data is cleared
-    so every session starts and ends with a clean slate.
-    """
     settings = get_settings()
     logger.info(
         f"Starting Adaptive RAG API | env={settings.APP_ENV} | "
         f"log_level={settings.LOG_LEVEL}"
     )
     yield
-    logger.info("Adaptive RAG API shutting down — clearing session data …")
+    logger.info("Adaptive RAG API shutting down — clearing session data ...")
 
-    from app.api.dependencies import (
-        get_chroma_manager,
-        get_ingestion_tracker,
-    )
+    from app.api.dependencies import get_chroma_manager, get_ingestion_tracker
     from app.api.session import reset_all_data
 
     reset_all_data(
@@ -57,16 +30,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     )
 
 
-# ── Application Factory ────────────────────────────────────────────────────────
-
 def create_app() -> FastAPI:
-    """
-    Construct and configure the FastAPI application.
-
-    Using a factory function (rather than a bare module-level instance)
-    makes the app easier to test — tests can call create_app() to get a
-    fresh instance with test settings.
-    """
     settings = get_settings()
 
     app = FastAPI(
@@ -82,8 +46,6 @@ def create_app() -> FastAPI:
         lifespan=lifespan,
     )
 
-    # ── Middleware ──────────────────────────────────────────────────────────────
-    # CORS — permissive in development; tighten allow_origins in production.
     app.add_middleware(
         CORSMiddleware,
         allow_origins=["*"] if not settings.is_production else [],
@@ -92,9 +54,6 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
 
-    # ── Routers ────────────────────────────────────────────────────────────────
-    # All routers are registered at the root prefix.
-    # Individual endpoints define their own paths (e.g. /health, /upload).
     app.include_router(health.router)
     app.include_router(upload.router)
     app.include_router(query.router)
@@ -105,6 +64,4 @@ def create_app() -> FastAPI:
     return app
 
 
-# ── Application Instance ───────────────────────────────────────────────────────
-# This is the object uvicorn targets: `uvicorn app.main:app`
 app = create_app()

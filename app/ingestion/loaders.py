@@ -1,32 +1,3 @@
-"""
-app/ingestion/loaders.py
-
-Document loaders for the Adaptive RAG ingestion pipeline.
-
-Responsibilities:
-  - Accept a file path for any supported document type.
-  - Extract full text content.
-  - Extract available metadata (page count, sheet names, author, etc.).
-  - Return a RawDocument ready for the chunker.
-
-Supported formats:
-  - PDF   → pdfplumber  (handles text-heavy and mixed-layout PDFs)
-  - DOCX  → python-docx (preserves paragraph structure)
-  - TXT   → built-in    (UTF-8 with Latin-1 fallback)
-  - XLSX  → openpyxl    (row-level text extraction per sheet)
-
-Fix #1 — Wrong document_name stored in ChromaDB:
-  load() now accepts an optional `original_filename` parameter.
-  When provided, it is used as `document_name` in the returned RawDocument
-  instead of path.name. This ensures that when the API writes the upload
-  to a NamedTemporaryFile (e.g. /tmp/tmpabc123.pdf), the user's real
-  filename ("contract_a.pdf") is what gets stored in ChromaDB — not the
-  temp name that disappears after the request.
-
-This module does NOT produce embeddings or interact with ChromaDB.
-Those responsibilities belong to Phase 3.
-"""
-
 from __future__ import annotations
 
 import os
@@ -42,54 +13,19 @@ from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
-# Supported extensions mapped to their internal handler names.
 SUPPORTED_EXTENSIONS: frozenset[str] = frozenset({"pdf", "docx", "txt", "xlsx"})
 
 
 class UnsupportedFileTypeError(Exception):
-    """Raised when a file with an unsupported extension is submitted."""
+    pass
 
 
 class DocumentLoader:
-    """
-    Dispatches file loading to the appropriate format-specific method.
-
-    Usage:
-        loader = DocumentLoader()
-
-        # When loading from disk with the real filename available:
-        raw_doc = loader.load("/tmp/tmpabc123.pdf", original_filename="contract_a.pdf")
-
-        # When loading a file whose path IS the real name:
-        raw_doc = loader.load("/path/to/contract_a.pdf")
-    """
-
     def load(
         self,
         file_path: str | Path,
         original_filename: str | None = None,
     ) -> RawDocument:
-        """
-        Load a document from disk and return a RawDocument.
-
-        Args:
-            file_path:         Absolute or relative path to the document on disk.
-                               May be a temp file path.
-            original_filename: The user-facing filename (e.g. "contract_a.pdf").
-                               When provided, this overrides path.name as the
-                               document_name stored in RawDocument and eventually
-                               ChromaDB. If None, path.name is used as-is.
-
-        Returns:
-            RawDocument with extracted text and metadata.
-            RawDocument.document_name is always the user-facing filename,
-            never a temp path name.
-
-        Raises:
-            FileNotFoundError:      If the file does not exist on disk.
-            UnsupportedFileTypeError: If the extension is not supported.
-            ValueError:             If text extraction yields no content.
-        """
         path = Path(file_path).resolve()
 
         if not path.exists():
@@ -99,20 +35,12 @@ class DocumentLoader:
 
         if extension not in SUPPORTED_EXTENSIONS:
             raise UnsupportedFileTypeError(
-                f"Unsupported file type '.{extension}'. "
-                f"Supported: {sorted(SUPPORTED_EXTENSIONS)}"
+                f"Unsupported file type '.{extension}'. Supported: {sorted(SUPPORTED_EXTENSIONS)}"
             )
 
-        # Fix #1: Use the caller-supplied original filename when available.
-        # This is the name that will flow through chunking and into ChromaDB.
         document_name = original_filename if original_filename else path.name
 
-        logger.info(
-            "Loading document: '%s' from path '%s' (type=%s)",
-            document_name,
-            path.name,
-            extension,
-        )
+        logger.info("Loading document: '%s' from path '%s' (type=%s)", document_name, path.name, extension)
 
         dispatch: dict[str, Any] = {
             "pdf": self._load_pdf,
@@ -125,39 +53,15 @@ class DocumentLoader:
 
         if not raw_doc.full_text.strip():
             raise ValueError(
-                f"No text could be extracted from '{document_name}'. "
-                "The file may be empty, image-only, or corrupted."
+                f"No text could be extracted from '{document_name}'. The file may be empty, image-only, or corrupted."
             )
 
-        logger.info(
-            "Loaded '%s' — %d characters extracted.",
-            document_name,
-            len(raw_doc.full_text),
-        )
+        logger.info("Loaded '%s' — %d characters extracted.", document_name, len(raw_doc.full_text))
         return raw_doc
 
-    # ------------------------------------------------------------------ #
-    # PDF                                                                  #
-    # ------------------------------------------------------------------ #
-
     def _load_pdf(self, path: Path, document_name: str) -> RawDocument:
-        """
-        Extract text from a PDF using pdfplumber.
-
-        pdfplumber is preferred over PyPDF2/pypdf because it handles
-        complex layouts (multi-column, tables) more reliably and exposes
-        clean per-page text without needing heuristic post-processing.
-
-        Each page's text is joined with a newline. Page boundaries are
-        preserved in the metadata so the chunker can annotate chunks
-        with approximate page numbers.
-
-        Args:
-            path:          Filesystem path to the PDF file.
-            document_name: User-facing filename to store in the RawDocument.
-        """
         pages_text: list[str] = []
-        page_char_offsets: list[int] = []  # cumulative char offset per page
+        page_char_offsets: list[int] = []
         cumulative = 0
 
         with pdfplumber.open(path) as pdf:
@@ -166,14 +70,12 @@ class DocumentLoader:
                 text = page.extract_text() or ""
                 pages_text.append(text)
                 page_char_offsets.append(cumulative)
-                cumulative += len(text) + 1  # +1 for the joining newline
+                cumulative += len(text) + 1
 
         full_text = "\n".join(pages_text)
 
         metadata: dict[str, Any] = {
             "total_pages": total_pages,
-            # page_char_offsets maps each page index → start char position
-            # in full_text. The chunker uses this to assign page numbers.
             "page_char_offsets": page_char_offsets,
         }
 
@@ -184,34 +86,13 @@ class DocumentLoader:
             metadata=metadata,
         )
 
-    # ------------------------------------------------------------------ #
-    # DOCX                                                                 #
-    # ------------------------------------------------------------------ #
-
     def _load_docx(self, path: Path, document_name: str) -> RawDocument:
-        """
-        Extract text from a Word document using python-docx.
-
-        Each paragraph is joined with a newline. Empty paragraphs
-        (used as visual spacers in Word) are filtered to reduce noise.
-
-        DOCX files do not have a reliable page-number concept at the
-        paragraph level without rendering the document, so page_number
-        will be None for all DOCX chunks.
-
-        Args:
-            path:          Filesystem path to the DOCX file.
-            document_name: User-facing filename to store in the RawDocument.
-        """
         doc = DocxDocument(str(path))
 
         paragraphs: list[str] = [
-            para.text
-            for para in doc.paragraphs
-            if para.text.strip()
+            para.text for para in doc.paragraphs if para.text.strip()
         ]
 
-        # Also extract text from tables, which python-docx skips by default.
         for table in doc.tables:
             for row in table.rows:
                 row_text = " | ".join(
@@ -222,7 +103,6 @@ class DocumentLoader:
 
         full_text = "\n".join(paragraphs)
 
-        # Extract core document properties where available.
         props = doc.core_properties
         metadata: dict[str, Any] = {
             "author": props.author or "",
@@ -239,27 +119,11 @@ class DocumentLoader:
             metadata=metadata,
         )
 
-    # ------------------------------------------------------------------ #
-    # TXT                                                                  #
-    # ------------------------------------------------------------------ #
-
     def _load_txt(self, path: Path, document_name: str) -> RawDocument:
-        """
-        Read a plain text file.
-
-        Attempts UTF-8 first; falls back to Latin-1 to handle
-        legacy documents without raising an encoding error.
-
-        Args:
-            path:          Filesystem path to the TXT file.
-            document_name: User-facing filename to store in the RawDocument.
-        """
         try:
             full_text = path.read_text(encoding="utf-8")
         except UnicodeDecodeError:
-            logger.warning(
-                "'%s' is not valid UTF-8; falling back to Latin-1.", document_name
-            )
+            logger.warning("'%s' is not valid UTF-8; falling back to Latin-1.", document_name)
             full_text = path.read_text(encoding="latin-1")
 
         metadata: dict[str, Any] = {
@@ -274,30 +138,7 @@ class DocumentLoader:
             metadata=metadata,
         )
 
-    # ------------------------------------------------------------------ #
-    # XLSX                                                                 #
-    # ------------------------------------------------------------------ #
-
     def _load_xlsx(self, path: Path, document_name: str) -> RawDocument:
-        """
-        Extract text from an Excel workbook using openpyxl.
-
-        Strategy:
-          - Iterate over all sheets.
-          - For each sheet, iterate over rows.
-          - Convert each non-empty row to a pipe-delimited string.
-          - Prefix each sheet's content with a header line.
-
-        This produces structured, readable text that preserves the
-        tabular nature of the data while remaining searchable as plain text.
-
-        Excel does not have a page-number concept, so page_number will
-        be None for all XLSX chunks.
-
-        Args:
-            path:          Filesystem path to the XLSX file.
-            document_name: User-facing filename to store in the RawDocument.
-        """
         wb = load_workbook(filename=str(path), read_only=True, data_only=True)
         sheet_texts: list[str] = []
         sheet_names: list[str] = wb.sheetnames
@@ -307,7 +148,6 @@ class DocumentLoader:
             rows_text: list[str] = []
 
             for row in ws.iter_rows(values_only=True):
-                # Skip entirely empty rows.
                 non_empty = [str(cell) if cell is not None else "" for cell in row]
                 if any(cell.strip() for cell in non_empty):
                     rows_text.append(" | ".join(non_empty))

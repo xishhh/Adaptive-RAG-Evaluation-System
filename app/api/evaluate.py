@@ -1,37 +1,3 @@
-"""
-app/api/evaluate.py
-
-Evaluation endpoints — Phase 6 implementation.
-
-POST /evaluate  — runs the RAGAS evaluation harness against a JSONL dataset.
-GET  /metrics   — returns historical evaluation metrics and aggregate summaries.
-
-Architecture:
-  POST /evaluate:
-    EvaluateRequest (dataset_path, run_label)
-        → RagasEvaluator.run(dataset_path)   [loads JSONL, runs RAGAS]
-        → MetricsTracker.save_run(...)        [persists report to disk]
-        → EvaluationResponse
-
-  GET /metrics:
-    MetricsTracker.list_runs()               [reads evaluation_results/]
-    MetricsTracker.get_aggregate_metrics()   [computes means across runs]
-        → MetricsSummaryResponse
-
-Design decisions:
-  1. RagasEvaluator and MetricsTracker are module-level singletons.
-     They are stateless between requests, but constructing ChatOpenAI
-     on every request wastes time and risks rate-limit spikes.
-  2. dataset_path is treated as a filesystem path relative to the
-     working directory. Absolute paths also work.
-  3. Evaluation is synchronous. For large datasets this is slow, but
-     async job queuing is out of scope for Phase 6.
-  4. HTTPException codes:
-       404 — dataset file not found
-       422 — dataset is malformed (missing fields, invalid JSON)
-       500 — unexpected RAGAS or I/O failure
-"""
-
 import asyncio
 from datetime import datetime, timezone
 from pathlib import Path
@@ -53,16 +19,11 @@ logger = get_logger(__name__)
 router = APIRouter()
 
 
-
-
 @router.post(
     "/evaluate",
     response_model=EvaluationResponse,
     summary="Run Evaluation",
-    description=(
-        "Run the RAGAS evaluation harness against a JSONL evaluation dataset. "
-        "Each line of the dataset must contain: question, answer, contexts (list), reference."
-    ),
+    description="Run the RAGAS evaluation harness against a JSONL evaluation dataset.",
     tags=["Evaluation"],
     status_code=status.HTTP_200_OK,
 )
@@ -71,17 +32,6 @@ async def run_evaluation(
     ragas_evaluator: RagasEvaluator = Depends(get_ragas_evaluator),
     metrics_tracker: MetricsTracker = Depends(get_metrics_tracker),
 ) -> EvaluationResponse:
-    """
-    Evaluate system quality using RAGAS metrics.
-
-    The dataset at `dataset_path` must be a JSONL file where each line is:
-        {
-          "question":  "<user question>",
-          "answer":    "<rag-generated answer>",
-          "contexts":  ["<chunk text 1>", "<chunk text 2>", ...],
-          "reference": "<ground-truth answer>"
-        }
-    """
     dataset_path = Path(request.dataset_path)
     logger.info(
         "POST /evaluate | label='%s' | dataset='%s'",
@@ -89,11 +39,7 @@ async def run_evaluation(
         dataset_path,
     )
 
-    # ------------------------------------------------------------------ #
-    # Run evaluation                                                        #
-    # ------------------------------------------------------------------ #
     try:
-        # Run in a thread so RAGAS gets a clean event loop (avoids conflict with FastAPI's loop).
         scores = await asyncio.to_thread(ragas_evaluator.run, dataset_path)
     except FileNotFoundError as exc:
         logger.warning("Evaluation dataset not found: %s", exc)
@@ -114,10 +60,6 @@ async def run_evaluation(
             detail=f"Evaluation failed: {exc}",
         ) from exc
 
-    # ------------------------------------------------------------------ #
-    # Persist run report                                                    #
-    # ------------------------------------------------------------------ #
-    # Load dataset once more just to count samples (already validated above).
     try:
         dataset = ragas_evaluator.load_dataset(dataset_path)
         sample_count = len(dataset)
@@ -153,24 +95,17 @@ async def run_evaluation(
     "/metrics",
     response_model=MetricsSummaryResponse,
     summary="Get Evaluation Metrics",
-    description=(
-        "Retrieve historical evaluation runs and aggregate metric summaries. "
-        "Returns up to 50 most recent runs, newest first."
-    ),
+    description="Retrieve historical evaluation runs and aggregate metric summaries.",
     tags=["Evaluation"],
     status_code=status.HTTP_200_OK,
 )
 async def get_metrics(
     metrics_tracker: MetricsTracker = Depends(get_metrics_tracker),
 ) -> MetricsSummaryResponse:
-    """
-    Return all historical evaluation runs and per-metric aggregate scores.
-    """
     logger.info("GET /metrics called.")
 
     runs_raw = metrics_tracker.list_runs(limit=50)
     aggregate = metrics_tracker.get_aggregate_metrics()
-
     runs = [EvaluationRunRecord(**record) for record in runs_raw]
 
     return MetricsSummaryResponse(
